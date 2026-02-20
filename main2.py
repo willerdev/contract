@@ -9,11 +9,9 @@ from jose import jwt
 from datetime import datetime, timedelta
 import traceback
 
-# Contract plans: choice 1=$1989, 2=$2900, 3=$4190. Each earns 2% per day.
-CONTRACT_OPTIONS = {1: 1989.0, 2: 2900.0, 3: 4190.0}
 DAILY_RATE = 0.02  # 2% per day
 
-from database import get_db, User, Contract, Withdrawal, TrustedWallet
+from database import get_db, User, Contract, ContractPlan, Withdrawal, TrustedWallet
 
 SECRET_KEY = "secret123"
 
@@ -94,23 +92,23 @@ def login(data: dict, db: Session = Depends(get_db)):
 # ================= BUY CONTRACT =================
 
 @app.get("/contracts/options")
-def contract_options():
+def contract_options(db: Session = Depends(get_db)):
     """List available contract plans (for CLI display)."""
-    return [
-        {"choice": 1, "amount": 1989},
-        {"choice": 2, "amount": 2900},
-        {"choice": 3, "amount": 4190},
-    ]
+    plans = db.query(ContractPlan).order_by(ContractPlan.id).all()
+    return [{"id": p.id, "amount": p.amount, "label": p.label or f"${int(p.amount)}"} for p in plans]
 
 
 @app.post("/buy")
 def buy_contract(data: dict,
                  user: User = Depends(get_current_user),
                  db: Session = Depends(get_db)):
-    choice = data.get("contract_choice")
-    if choice not in (1, 2, 3):
-        raise HTTPException(status_code=400, detail="Choose contract 1 ($1989), 2 ($2900), or 3 ($4190)")
-    amount = CONTRACT_OPTIONS[choice]
+    plan_id = data.get("contract_choice") or data.get("plan_id")
+    if plan_id is None:
+        raise HTTPException(status_code=400, detail="contract_choice or plan_id required")
+    plan = db.query(ContractPlan).filter(ContractPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=400, detail="Invalid contract plan")
+    amount = plan.amount
     wallet = (data.get("wallet") or "").strip() or None
 
     start = datetime.utcnow()

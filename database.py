@@ -77,8 +77,33 @@ class TrustedWallet(Base):
     is_default = Column(Boolean, default=False)
 
 
+class ContractPlan(Base):
+    __tablename__ = "contract_plans"
+    id = Column(Integer, primary_key=True)
+    amount = Column(Float)
+    label = Column(String, nullable=True)
+
+
 # Create tables if they don't exist
 Base.metadata.create_all(engine)
+
+
+def seed_contract_plans():
+    """Insert default contract plans if the table is empty."""
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+    session = Session(engine)
+    try:
+        count = session.query(ContractPlan).count()
+        if count == 0:
+            for plan_id, amount in [(1, 1989.0), (2, 2900.0), (3, 4190.0)]:
+                session.add(ContractPlan(id=plan_id, amount=amount, label=f"${int(amount)}"))
+            session.commit()
+    finally:
+        session.close()
+
+
+seed_contract_plans()
 
 # SQLite-only: add new columns to existing tables (no-op if already present)
 if _is_sqlite:

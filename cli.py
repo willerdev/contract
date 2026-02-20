@@ -9,7 +9,7 @@ try:
 except ImportError:
     pass
 
-BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8000")
+BASE_URL = os.environ.get("BASE_URL", "https://contract-31az.onrender.com")
 TOKEN_FILE = "token.txt"
 
 
@@ -130,12 +130,22 @@ def _require_auth():
 def buy():
     if not _require_auth():
         return
+    res = requests.get(f"{BASE_URL}/contracts/options")
+    options, err = _parse_response(res)
+    if err or not isinstance(options, list) or not options:
+        print(f"❌ {err or 'Could not load contract plans'}")
+        return
     print("\n--- Contract plans (2% per day) ---")
-    print("1. $1989")
-    print("2. $2900")
-    print("3. $4190")
-    choice = input("Choose (1, 2, or 3): ").strip()
-    if choice not in ("1", "2", "3"):
+    valid = []
+    for p in options:
+        pid = p.get("id")
+        amt = p.get("amount", 0)
+        label = p.get("label") or f"${int(amt)}"
+        if pid is not None:
+            valid.append(str(pid))
+            print(f"{pid}. {label}")
+    choice = input(f"Choose ({', '.join(valid)}): ").strip()
+    if choice not in valid:
         print("❌ Invalid choice")
         return
     contract_choice = int(choice)
