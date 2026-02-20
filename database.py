@@ -1,0 +1,216 @@
+"""
+File database (SQLite) or Neon Postgres for the app. Use get_db() in FastAPI Depends, or the
+save/retrieve helpers with a session to store and load data.
+
+Set DATABASE_URL (or NEON_DATABASE_URL) to a Neon Postgres connection string to use Neon.
+Loads from .env if python-dotenv is installed.
+"""
+import os
+from datetime import datetime
+
+# Load .env so DATABASE_URL is set (optional; requires: pip install python-dotenv)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy.exc import IntegrityError
+
+# Prefer Neon/Postgres if DATABASE_URL or NEON_DATABASE_URL is set
+_raw_url = os.environ.get("DATABASE_URL") or os.environ.get("NEON_DATABASE_URL")
+if _raw_url and _raw_url.strip().startswith("postgresql"):
+    # Ensure SQLAlchemy uses psycopg2 driver
+    DATABASE_URL = _raw_url.strip()
+    if "postgresql://" in DATABASE_URL and "postgresql+psycopg2" not in DATABASE_URL:
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
+    engine = create_engine(DATABASE_URL)
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    DATABASE_PATH = os.path.join(SCRIPT_DIR, "database.db")
+    DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+_is_sqlite = "sqlite" in DATABASE_URL
+
+
+# ================= MODELS =================
+
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    email = Column(String, unique=True)
+    password = Column(String)
+
+
+class Contract(Base):
+    __tablename__ = "contracts"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
+    status = Column(String)
+    start_date = Column(DateTime)
+    end_date = Column(DateTime)
+    wallet = Column(String, nullable=True)
+    amount = Column(Float)  # contract plan amount: 1989, 2900, or 4190
+
+
+class Withdrawal(Base):
+    __tablename__ = "withdrawals"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
+    amount = Column(Float)
+    wallet = Column(String)
+    status = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+
+
+class TrustedWallet(Base):
+    __tablename__ = "trusted_wallets"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
+    wallet = Column(String)
+    label = Column(String, nullable=True)
+    is_default = Column(Boolean, default=False)
+
+
+# Create tables if they don't exist
+Base.metadata.create_all(engine)
+
+# SQLite-only: add new columns to existing tables (no-op if already present)
+if _is_sqlite:
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE withdrawals ADD COLUMN created_at DATETIME"))
+            conn.commit()
+    except Exception:
+        pass
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE contracts ADD COLUMN amount REAL"))
+            conn.commit()
+    except Exception:
+        pass
+
+
+# ================= SESSION =================
+
+
+def get_db():
+    """Yield a DB session (for FastAPI Depends). Caller must not hold session across async boundaries."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# ================= SAVE / RETRIEVE HELPERS =================
+
+
+def get_user_by_email(db: Session, email: str):
+    return db.query(User).filter(User.email == email).first()
+
+
+def get_user_by_id(db: Session, user_id: int):
+    return db.query(User).filter(User.id == user_id).first()
+
+
+def save_user(db: Session, email: str, password_hash: str):
+    """Create a new user. Raises IntegrityError if email already exists."""
+    user = User(email=email, password=password_hash)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def get_contract_by_id(db: Session, contract_id: int, user_id: int = None):
+    q = db.query(Contract).filter(Contract.id == contract_id)
+    if user_id is not None:
+        q = q.filter(Contract.user_id == user_id)
+    return q.first()
+
+
+def get_contracts_by_user(db: Session, user_id: int):
+    return db.query(Contract).filter(Contract.user_id == user_id).all()
+
+
+def save_contract(db: Session, user_id: int, status: str, start_date, end_date, amount: float, wallet: str = None):
+    contract = Contract(
+        user_id=user_id,
+        status=status,
+        start_date=start_date,
+        end_date=end_date,
+        wallet=wallet,
+        amount=amount,
+    )
+    db.add(contract)
+    db.commit()
+    db.refresh(contract)
+    return contract
+
+
+def update_contract_status(db: Session, contract_id: int, user_id: int, status: str):
+    contract = get_contract_by_id(db, contract_id, user_id)
+    if not contract:
+        return None
+    contract.status = status
+    db.commit()
+    db.refresh(contract)
+    return contract
+
+
+def save_withdrawal(db: Session, user_id: int, amount: float, wallet: str, status: str = "pending"):
+    w = Withdrawal(user_id=user_id, amount=amount, wallet=wallet, status=status)
+    db.add(w)
+    db.commit()
+    db.refresh(w)
+    return w
+
+
+def get_withdrawals_by_user(db: Session, user_id: int):
+    return db.query(Withdrawal).filter(Withdrawal.user_id == user_id).order_by(Withdrawal.id.desc()).all()
+
+
+def get_trusted_wallets_by_user(db: Session, user_id: int):
+    return db.query(TrustedWallet).filter(TrustedWallet.user_id == user_id).all()
+
+
+def get_default_wallet(db: Session, user_id: int):
+    return db.query(TrustedWallet).filter(TrustedWallet.user_id == user_id, TrustedWallet.is_default == True).first()
+
+
+def save_trusted_wallet(db: Session, user_id: int, wallet: str, label: str = None, is_default: bool = False):
+    if is_default:
+        db.query(TrustedWallet).filter(TrustedWallet.user_id == user_id).update({TrustedWallet.is_default: False})
+    w = TrustedWallet(user_id=user_id, wallet=wallet.strip(), label=label, is_default=is_default)
+    db.add(w)
+    db.commit()
+    db.refresh(w)
+    return w
+
+
+def set_default_trusted_wallet(db: Session, user_id: int, wallet_id: int):
+    db.query(TrustedWallet).filter(TrustedWallet.user_id == user_id).update({TrustedWallet.is_default: False})
+    w = db.query(TrustedWallet).filter(TrustedWallet.id == wallet_id, TrustedWallet.user_id == user_id).first()
+    if not w:
+        return None
+    w.is_default = True
+    db.commit()
+    db.refresh(w)
+    return w
+
+
+def delete_trusted_wallet(db: Session, wallet_id: int, user_id: int):
+    w = db.query(TrustedWallet).filter(TrustedWallet.id == wallet_id, TrustedWallet.user_id == user_id).first()
+    if not w:
+        return False
+    db.delete(w)
+    db.commit()
+    return True

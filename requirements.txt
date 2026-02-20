@@ -1,0 +1,12 @@
+# API server
+fastapi
+uvicorn
+python-jose[cryptography]
+bcrypt
+passlib
+sqlalchemy
+requests
+
+# Optional: for Neon Postgres (set DATABASE_URL in .env)
+psycopg2-binary
+python-dotenv

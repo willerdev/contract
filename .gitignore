@@ -1,0 +1,11 @@
+# Env and secrets (never commit)
+.env
+.env.local
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+token.txt
