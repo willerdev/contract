@@ -11,7 +11,7 @@ import traceback
 
 DAILY_RATE = 0.02  # 2% per day
 
-from database import get_db, User, Contract, ContractPlan, Withdrawal, TrustedWallet
+from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet
 
 SECRET_KEY = "secret123"
 
@@ -41,11 +41,17 @@ def create_token(user_id: int):
 
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    if not token or not (token := token.strip()):
+        raise HTTPException(status_code=401, detail="Invalid token")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         user = db.query(User).filter(User.id == payload["user_id"]).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid token")
         return user
-    except:
+    except HTTPException:
+        raise
+    except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
@@ -98,6 +104,24 @@ def contract_options(db: Session = Depends(get_db)):
     return [{"id": p.id, "amount": p.amount, "label": p.label or f"${int(p.amount)}"} for p in plans]
 
 
+@app.get("/contracts/check-columns")
+def check_columns(db: Session = Depends(get_db)):
+    """Check if payment columns exist in contracts table (diagnostic endpoint)."""
+    from sqlalchemy import text, inspect as sql_inspect
+    try:
+        inspector = sql_inspect(db.bind)
+        columns = [col['name'] for col in inspector.get_columns('contracts')]
+        return {
+            "columns_exist": {
+                "payment_wallet": "payment_wallet" in columns,
+                "payment_tx_id": "payment_tx_id" in columns,
+            },
+            "all_columns": columns,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.post("/buy")
 def buy_contract(data: dict,
                  user: User = Depends(get_current_user),
@@ -109,23 +133,98 @@ def buy_contract(data: dict,
     if not plan:
         raise HTTPException(status_code=400, detail="Invalid contract plan")
     amount = plan.amount
-    wallet = (data.get("wallet") or "").strip() or None
+
+    payment_wallet = (data.get("payment_wallet") or data.get("wallet") or "").strip()
+    if not payment_wallet:
+        raise HTTPException(status_code=400, detail="Payment wallet (wallet used to pay) is required")
+    payment_tx_id = (data.get("payment_tx_id") or data.get("transaction_id") or "").strip()
+    if not payment_tx_id:
+        raise HTTPException(status_code=400, detail="Transaction ID of the payment is required")
+
+    wallet = (data.get("withdrawal_wallet") or "").strip() or None  # optional withdrawal destination
 
     start = datetime.utcnow()
     end = start + timedelta(days=30)
 
-    contract = Contract(
-        user_id=user.id,
-        status="active",
-        start_date=start,
-        end_date=end,
-        wallet=wallet,
-        amount=amount,
-    )
-    db.add(contract)
-    db.commit()
-    db.refresh(contract)
-    return {"status": "Contract activated", "contract_id": contract.id, "amount": amount}
+    # Step 1: Ensure payment columns exist using engine (separate connection, so no session conflict)
+    from sqlalchemy import text, inspect as sql_inspect
+    columns_exist = False
+    try:
+        inspector = sql_inspect(engine)
+        columns = [col['name'] for col in inspector.get_columns('contracts')]
+        has_payment_wallet = 'payment_wallet' in columns
+        has_payment_tx_id = 'payment_tx_id' in columns
+        if not has_payment_wallet or not has_payment_tx_id:
+            with engine.connect() as conn:
+                if not has_payment_wallet:
+                    conn.execute(text("ALTER TABLE contracts ADD COLUMN payment_wallet VARCHAR(255)"))
+                if not has_payment_tx_id:
+                    conn.execute(text("ALTER TABLE contracts ADD COLUMN payment_tx_id VARCHAR(255)"))
+                conn.commit()
+        columns_exist = True
+    except Exception:
+        columns_exist = False
+
+    try:
+        # Step 2: Create contract (ORM)
+        contract = Contract(
+            user_id=user.id,
+            status="pending",
+            start_date=start,
+            end_date=end,
+            wallet=wallet,
+            amount=amount,
+            payment_wallet=payment_wallet if columns_exist else None,
+            payment_tx_id=payment_tx_id if columns_exist else None,
+        )
+        db.add(contract)
+        db.flush()
+        contract_id = contract.id
+
+        # Step 3: Always save payment info via direct SQL (same session, before commit)
+        if columns_exist:
+            try:
+                db.execute(
+                    text("UPDATE contracts SET payment_wallet = :wallet, payment_tx_id = :tx WHERE id = :id"),
+                    {"wallet": payment_wallet, "tx": payment_tx_id, "id": contract_id}
+                )
+            except Exception:
+                pass
+
+        db.commit()
+        db.refresh(contract)
+
+        # Step 4: Verify saved by reading back
+        saved_payment_wallet = None
+        saved_payment_tx_id = None
+        try:
+            row = db.execute(
+                text("SELECT payment_wallet, payment_tx_id FROM contracts WHERE id = :id"),
+                {"id": contract_id}
+            ).fetchone()
+            if row:
+                saved_payment_wallet = row[0]
+                saved_payment_tx_id = row[1]
+        except Exception:
+            pass
+        
+        response = {
+            "status": "Contract submitted for verification",
+            "contract_id": contract.id,
+            "amount": amount,
+            "payment_wallet": saved_payment_wallet,
+            "payment_tx_id": saved_payment_tx_id,
+            "message": "The system will verify your payment and activate the contract.",
+        }
+        
+        # Add warning if payment info wasn't saved
+        if not saved_payment_wallet or not saved_payment_tx_id:
+            response["warning"] = "Payment info not saved. Database columns may be missing. Run: ALTER TABLE contracts ADD COLUMN payment_wallet VARCHAR(255); ALTER TABLE contracts ADD COLUMN payment_tx_id VARCHAR(255);"
+        
+        return response
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create contract: {str(e)}")
 
 
 # ================= UPGRADE =================
@@ -193,18 +292,37 @@ def _contract_balance(contract, now=None):
 @app.get("/dashboard")
 def dashboard(user: User = Depends(get_current_user),
               db: Session = Depends(get_db)):
+    db.refresh(user)
     contracts = db.query(Contract).filter(Contract.user_id == user.id).all()
     withdrawals = db.query(Withdrawal).filter(Withdrawal.user_id == user.id).all()
     total_withdrawn = sum(w.amount for w in withdrawals)
     total_balance = sum(_contract_balance(c) for c in contracts)
-    available = total_balance - total_withdrawn
+    available = getattr(user, "available_for_withdraw", None)
+    if available is None:
+        available = 0.0
+    available = max(0.0, float(available))
 
     return {
         "contracts": len(contracts),
         "total_balance": round(total_balance, 2),
         "withdrawn": round(total_withdrawn, 2),
         "available": round(available, 2),
+        "contract_list": [
+            {"id": c.id, "amount": c.amount, "status": c.status or "pending"}
+            for c in contracts
+        ],
     }
+
+
+@app.get("/contracts")
+def list_contracts(user: User = Depends(get_current_user),
+                   db: Session = Depends(get_db)):
+    """List all user's contracts (for Run menu)."""
+    contracts = db.query(Contract).filter(Contract.user_id == user.id).all()
+    return [
+        {"id": c.id, "amount": c.amount, "status": c.status or "pending"}
+        for c in contracts
+    ]
 
 
 # ================= WITHDRAWAL HISTORY =================
@@ -306,14 +424,21 @@ def withdraw(data: dict,
             wallet = default.wallet
         else:
             raise HTTPException(status_code=400, detail="wallet required or set a default wallet")
-    # Check available balance
-    contracts = db.query(Contract).filter(Contract.user_id == user.id).all()
-    withdrawals = db.query(Withdrawal).filter(Withdrawal.user_id == user.id).all()
-    total_balance = sum(_contract_balance(c) for c in contracts)
-    total_withdrawn = sum(w.amount for w in withdrawals)
-    available = total_balance - total_withdrawn
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="amount must be a number")
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be positive")
+    db.refresh(user)
+    available = getattr(user, "available_for_withdraw", None) or 0.0
+    available = max(0.0, float(available))
     if amount > available:
-        raise HTTPException(status_code=400, detail=f"Amount exceeds available balance ({round(available, 2)})")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Amount exceeds available for withdrawal ({round(available, 2)}). The system sets your withdrawable amount.",
+        )
+    user.available_for_withdraw = available - amount
     withdrawal = Withdrawal(
         user_id=user.id,
         amount=amount,

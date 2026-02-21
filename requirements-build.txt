@@ -1,0 +1,5 @@
+# Install these before building the .exe:
+# pip install -r requirements-build.txt
+pyinstaller>=6.0
+requests
+python-dotenv

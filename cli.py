@@ -13,17 +13,24 @@ BASE_URL = os.environ.get("BASE_URL", "https://contract-31az.onrender.com")
 TOKEN_FILE = "token.txt"
 
 
+# Timeout for server check. Render free tier can take 30–60s to wake from spin-down.
+SERVER_CHECK_TIMEOUT = int(os.environ.get("CLI_SERVER_TIMEOUT", "75"))
+
+
 def _check_server():
     """Raise a clear error if the backend server is not reachable."""
     try:
-        requests.get(f"{BASE_URL}/", timeout=2)
+        requests.get(f"{BASE_URL}/", timeout=SERVER_CHECK_TIMEOUT)
     except requests.exceptions.ConnectionError:
         raise SystemExit(
             f"Cannot reach server at {BASE_URL}. Connection refused.\n"
             "Start the backend server first (e.g. in another terminal), then run this CLI again."
         )
     except requests.exceptions.Timeout:
-        raise SystemExit(f"Server at {BASE_URL} did not respond in time.")
+        raise SystemExit(
+            f"Server at {BASE_URL} did not respond in {SERVER_CHECK_TIMEOUT}s.\n"
+            "If using Render free tier, the service may be waking up—try again in a minute."
+        )
 
 
 def save_token(token):
@@ -116,7 +123,7 @@ def auth_headers():
     token = load_token()
     if not token:
         return None
-    return {"Authorization": f"Bearer {token}"}
+    return {"Authorization": f"Bearer {token.strip()}"}
 
 
 def _require_auth():
@@ -137,29 +144,60 @@ def buy():
         return
     print("\n--- Contract plans (2% per day) ---")
     valid = []
-    for p in options:
-        pid = p.get("id")
+    for i, p in enumerate(options):
+        # Support both "id" (new API) and "choice" (legacy), else use 1-based index
+        pid = p.get("id") if p.get("id") is not None else p.get("choice")
+        if pid is None:
+            pid = i + 1
         amt = p.get("amount", 0)
-        label = p.get("label") or f"${int(amt)}"
-        if pid is not None:
-            valid.append(str(pid))
-            print(f"{pid}. {label}")
+        try:
+            amt = float(amt)
+        except (TypeError, ValueError):
+            amt = 0
+        label = p.get("label") or (f"${int(amt)}" if amt else "?")
+        valid.append(str(pid))
+        print(f"{pid}. {label}")
     choice = input(f"Choose ({', '.join(valid)}): ").strip()
     if choice not in valid:
         print("❌ Invalid choice")
         return
     contract_choice = int(choice)
+    payment_wallet = input("Wallet address used to pay: ").strip()
+    if not payment_wallet:
+        print("❌ Payment wallet is required")
+        return
+    transaction_id = input("Transaction ID of the payment: ").strip()
+    if not transaction_id:
+        print("❌ Transaction ID is required")
+        return
     res = requests.post(
         f"{BASE_URL}/buy",
         headers=auth_headers(),
-        json={"contract_choice": contract_choice}
+        json={
+            "contract_choice": contract_choice,
+            "payment_wallet": payment_wallet,
+            "payment_tx_id": transaction_id,
+        }
     )
     data, err = _parse_response(res)
+    if res.status_code == 401:
+        print("❌ Session expired or invalid. Please log out (option 7) and log in again.")
+        return
     if err:
         print(f"❌ {err}")
         return
     if isinstance(data, dict) and "contract_id" in data:
-        print(f"✅ Contract activated. ID: {data['contract_id']}, Amount: ${data.get('amount', '')}")
+        print(f"✅ {data.get('message', data.get('status', 'Contract submitted.'))}")
+        print(f"   Contract ID: {data['contract_id']}, Amount: ${data.get('amount', '')}")
+        if data.get("payment_wallet"):
+            print(f"   Payment wallet: {data['payment_wallet']}")
+        if data.get("payment_tx_id"):
+            print(f"   Transaction ID: {data['payment_tx_id']}")
+        if not data.get("payment_wallet") or not data.get("payment_tx_id"):
+            print("   ⚠️  Warning: Payment info may not be saved.")
+        else:
+            print("   ✓ Payment info saved successfully")
+        print("   Contract will be active after the system verifies your payment.")
     else:
         print(data if isinstance(data, dict) else res.text)
 
@@ -261,13 +299,21 @@ def wallets_menu():
 def withdraw():
     if not _require_auth():
         return
+    dash = requests.get(f"{BASE_URL}/dashboard", headers=auth_headers())
+    dash_data, _ = _parse_response(dash)
+    available = dash_data.get("available", 0) if isinstance(dash_data, dict) else 0
+    print(f"Available for withdrawal (set by system): ${available}")
     res = requests.get(f"{BASE_URL}/wallets", headers=auth_headers())
     data, err = _parse_response(res)
     wallets = (data if not err and data else []) or []
     default_wallet = next((w["wallet"] for w in wallets if w.get("is_default")), None)
     if default_wallet:
         print(f"Default wallet: {default_wallet} (leave blank to use it)")
-    amount = float(input("Amount: "))
+    try:
+        amount = float(input("Amount: "))
+    except ValueError:
+        print("❌ Enter a number")
+        return
     wallet = input("Withdraw to wallet (or press Enter for default): ").strip()
     if not wallet and default_wallet:
         wallet = default_wallet
@@ -288,6 +334,67 @@ def withdraw():
         print(f"❌ {err}")
         return
     print(data if isinstance(data, dict) else res.text)
+
+
+def _random_hex(length=12):
+    import random
+    return "".join(random.choices("0123456789abcdef", k=length))
+
+
+def run_contract():
+    """Show which contract to run, then show a 'processing' stream of fake $0.02 transactions."""
+    if not _require_auth():
+        return
+    timeout = 30
+    headers = auth_headers()
+    contract_list = []
+    # Try dashboard first (has contract_list)
+    res = requests.get(f"{BASE_URL}/dashboard", headers=headers, timeout=timeout)
+    if res.status_code == 401:
+        print("❌ Session expired or invalid. Please log out and log in again.")
+        return
+    data, err = _parse_response(res)
+    if not err and isinstance(data, dict):
+        contract_list = data.get("contract_list") or data.get("contractList") or []
+    # Fallback: if contract_list empty but dashboard says we have contracts, try GET /contracts
+    if not contract_list and isinstance(data, dict) and (data.get("contracts") or 0) > 0:
+        res2 = requests.get(f"{BASE_URL}/contracts", headers=headers, timeout=timeout)
+        if res2.status_code == 401:
+            print("❌ Session expired or invalid. Please log out and log in again.")
+            return
+        data2, err2 = _parse_response(res2)
+        if not err2 and isinstance(data2, list):
+            contract_list = data2
+    if not contract_list:
+        if err:
+            print(f"❌ {err}")
+        else:
+            print("No contracts to run. Buy a contract first.")
+        return
+    print("\n--- Run contract ---")
+    for c in contract_list:
+        print(f"  {c.get('id')}. Contract #{c.get('id')} — ${c.get('amount', 0):.0f} ({c.get('status', '?')})")
+    choice = input("Choose contract ID to run (or Enter to cancel): ").strip()
+    if not choice:
+        return
+    cid = None
+    for c in contract_list:
+        if str(c.get("id")) == choice:
+            cid = c.get("id")
+            break
+    if cid is None:
+        print("❌ Invalid contract ID")
+        return
+    print("\nLooking and processing transactions...\n")
+    import random
+    import time
+    delays = [1, 2, 5, 10]
+    n = random.randint(8, 15)
+    for i in range(n):
+        time.sleep(random.choice(delays))
+        tx_id = _random_hex(8) + "..." + _random_hex(8)
+        print(f"  [{time.strftime('%H:%M:%S')}] Processing transaction {tx_id}  +$0.02")
+    print("\nRun completed.")
 
 
 def stop():
@@ -323,8 +430,9 @@ def menu():
             print("4. Withdrawal history")
             print("5. My wallets")
             print("6. Stop Contract")
-            print("7. Log out")
-            print("8. Exit")
+            print("7. Run")
+            print("8. Log out")
+            print("9. Exit")
         else:
             print("1. Register")
             print("2. Login")
@@ -350,8 +458,10 @@ def menu():
             elif choice == "6":
                 stop()
             elif choice == "7":
-                logout()
+                run_contract()
             elif choice == "8":
+                logout()
+            elif choice == "9":
                 break
             else:
                 print("Invalid choice")
@@ -375,5 +485,6 @@ def menu():
 
 
 if __name__ == "__main__":
+    print("Checking server... (may take up to a minute if it's waking up)")
     _check_server()
     menu()

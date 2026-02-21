@@ -45,17 +45,20 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     email = Column(String, unique=True)
     password = Column(String)
+    available_for_withdraw = Column(Float, default=0.0)  # set by system; withdraw limit
 
 
 class Contract(Base):
     __tablename__ = "contracts"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer)
-    status = Column(String)
+    status = Column(String, default="pending")  # "pending" until system verifies payment, then "active"
     start_date = Column(DateTime)
     end_date = Column(DateTime)
-    wallet = Column(String, nullable=True)
-    amount = Column(Float)  # contract plan amount: 1989, 2900, or 4190
+    wallet = Column(String, nullable=True)  # withdrawal/destination wallet
+    amount = Column(Float)  # contract plan amount
+    payment_wallet = Column(String, nullable=True)  # wallet address used to pay
+    payment_tx_id = Column(String, nullable=True)  # transaction ID of the payment
 
 
 class Withdrawal(Base):
@@ -105,20 +108,80 @@ def seed_contract_plans():
 
 seed_contract_plans()
 
-# SQLite-only: add new columns to existing tables (no-op if already present)
+# Add new columns to existing tables (for both SQLite and PostgreSQL/Neon)
+from sqlalchemy import text, inspect
+
+def _column_exists(table_name, column_name):
+    """Check if a column exists in a table."""
+    try:
+        inspector = inspect(engine)
+        columns = [col['name'] for col in inspector.get_columns(table_name)]
+        return column_name in columns
+    except Exception:
+        # If inspection fails, assume column doesn't exist and try to add it
+        return False
+
+# SQLite migrations
 if _is_sqlite:
     try:
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE withdrawals ADD COLUMN created_at DATETIME"))
-            conn.commit()
+        if not _column_exists("withdrawals", "created_at"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE withdrawals ADD COLUMN created_at DATETIME"))
+                conn.commit()
     except Exception:
         pass
     try:
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE contracts ADD COLUMN amount REAL"))
-            conn.commit()
+        if not _column_exists("contracts", "amount"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE contracts ADD COLUMN amount REAL"))
+                conn.commit()
+    except Exception:
+        pass
+    for col, typ in [("payment_wallet", "VARCHAR(255)"), ("payment_tx_id", "VARCHAR(255)")]:
+        try:
+            if not _column_exists("contracts", col):
+                with engine.connect() as conn:
+                    conn.execute(text(f"ALTER TABLE contracts ADD COLUMN {col} {typ}"))
+                    conn.commit()
+        except Exception:
+            pass
+    try:
+        if not _column_exists("users", "available_for_withdraw"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN available_for_withdraw REAL DEFAULT 0"))
+                conn.commit()
+    except Exception:
+        pass
+else:
+    # PostgreSQL/Neon migrations - auto-add missing columns
+    try:
+        if not _column_exists("withdrawals", "created_at"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE withdrawals ADD COLUMN created_at TIMESTAMP"))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        if not _column_exists("contracts", "amount"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE contracts ADD COLUMN amount DOUBLE PRECISION"))
+                conn.commit()
+    except Exception:
+        pass
+    for col, typ in [("payment_wallet", "VARCHAR(255)"), ("payment_tx_id", "VARCHAR(255)")]:
+        try:
+            if not _column_exists("contracts", col):
+                with engine.connect() as conn:
+                    conn.execute(text(f"ALTER TABLE contracts ADD COLUMN {col} {typ}"))
+                    conn.commit()
+        except Exception as e:
+            # Column might already exist or table might not exist yet
+            pass
+    try:
+        if not _column_exists("users", "available_for_withdraw"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN available_for_withdraw DOUBLE PRECISION DEFAULT 0"))
+                conn.commit()
     except Exception:
         pass
 
