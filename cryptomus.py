@@ -1,7 +1,7 @@
 """
 Cryptomus API client: invoices (payments) and payouts.
-Auth: merchant header + sign = MD5(base64(body) + API_KEY).
-Docs: https://doc.cryptomus.com/
+Auth: merchant or userId header (see CRYPTOMUS_AUTH_HEADER) + sign = MD5(base64(body) + API_KEY).
+Docs: https://doc.cryptomus.com/ (merchant-api vs methods: merchant vs userId)
 """
 import os
 import json
@@ -14,6 +14,11 @@ CRYPTOMUS_API_BASE = "https://api.cryptomus.com"
 
 def _get_merchant_id():
     return (os.environ.get("CRYPTOMUS_MERCHANT_ID") or "").strip()
+
+
+def _get_auth_header_name():
+    """Personal accounts use 'userId', merchant accounts use 'merchant'. Default: merchant."""
+    return (os.environ.get("CRYPTOMUS_AUTH_HEADER") or "merchant").strip().lower()
 
 
 def _get_webhook_base():
@@ -45,14 +50,16 @@ def _sign_body(body: str, api_key: str) -> str:
 
 
 def _request(method: str, path: str, data: dict, api_key: str):
-    merchant = _get_merchant_id()
-    if not merchant or not api_key:
+    uuid_val = _get_merchant_id()
+    if not uuid_val or not api_key:
         return None, "Cryptomus not configured"
-    body = json.dumps(data) if data else ""
+    # Deterministic JSON so signature is reproducible (Cryptomus may be strict)
+    body = json.dumps(data, sort_keys=True, separators=(",", ":")) if data else ""
     sign = _sign_body(body, api_key)
     url = f"{CRYPTOMUS_API_BASE}{path}"
+    auth_header = "userId" if _get_auth_header_name() == "userid" else "merchant"
     headers = {
-        "merchant": merchant,
+        auth_header: uuid_val,
         "sign": sign,
         "Content-Type": "application/json",
     }

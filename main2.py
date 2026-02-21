@@ -329,7 +329,10 @@ def buy_contract(data: dict,
             )
             if err:
                 db.rollback()
-                raise HTTPException(status_code=502, detail=f"Cryptomus: {err}")
+                detail = f"Cryptomus: {err}"
+                if "401" in str(err) or "Unauthorized" in str(err):
+                    detail += " Check CRYPTOMUS_MERCHANT_ID and CRYPTOMUS_PAYMENT_API_KEY on the server."
+                raise HTTPException(status_code=502, detail=detail)
             contract.cryptomus_invoice_uuid = result.get("uuid")
             db.commit()
             db.refresh(contract)
