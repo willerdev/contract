@@ -52,13 +52,28 @@ def logout():
 
 
 def _parse_response(res):
-    """Return (data dict or None, error message or None). Handles empty/non-JSON body."""
+    """Return (data dict or None, error message or None). Handles empty/non-JSON body. Data can be dict or list."""
     if not res.text or not res.text.strip():
         return None, f"Server returned empty response (status {res.status_code})"
     try:
         return res.json(), None
     except json.JSONDecodeError:
         return None, f"Server response not JSON (status {res.status_code}): {res.text[:200]}"
+
+
+def _normalize_contract_list(raw):
+    """Take contract_list from API (list of dicts, or list of ids) and return list of dicts with id, amount, status."""
+    if not raw or not isinstance(raw, list):
+        return []
+    out = []
+    for c in raw:
+        if isinstance(c, dict):
+            cid = c.get("id") if c.get("id") is not None else c.get("contractId") or c.get("contract_id")
+            if cid is not None:
+                out.append({"id": cid, "amount": c.get("amount", 0), "status": c.get("status", "?")})
+        elif isinstance(c, (int, float, str)) and c != "":
+            out.append({"id": int(c) if isinstance(c, (float, str)) else c, "amount": 0, "status": "?"})
+    return out
 
 
 def _normalize_pin(pin: str) -> str:
@@ -348,7 +363,7 @@ def _random_hex(length=12):
 
 def run_contract():
     """Show which contract to run, then show a 'processing' stream of fake $0.02 transactions."""
-    if not _require_auth():
+    if not _require_au1234th():
         return
     # Use the same dashboard fetch as the Dashboard menu (option 2)
     data, err = _get_dashboard_data()
@@ -364,14 +379,30 @@ def run_contract():
         print("No contracts to run. Buy a contract first.")
         return
     # Get contract list: same source as dashboard (contract_list from dashboard response)
-    contract_list = data.get("contract_list") or data.get("contractList") or []
-    # If dashboard didn't include list but says we have contracts, fetch list from GET /contracts
+    raw_list = (
+        data.get("contract_list")
+        or data.get("contractList")
+        or (data.get("contracts") if isinstance(data.get("contracts"), list) else None)
+        or ((data.get("data") or {}).get("contract_list") if isinstance(data.get("data"), dict) else None)
+    )
+    contract_list = _normalize_contract_list(raw_list or [])
+    # If dashboard didn't include list but says we have contracts, fetch from GET /contracts
     if not contract_list and contracts_count > 0:
-        res2 = requests.get(f"{BASE_URL}/contracts", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT)
-        if res2.status_code == 200:
-            data2, err2 = _parse_response(res2)
-            if not err2 and isinstance(data2, list):
-                contract_list = [c for c in data2 if isinstance(c, dict) and c.get("id") is not None]
+        headers = auth_headers() or {}
+        headers["Accept"] = "application/json"
+        for path in ("/contracts", "/contracts/"):
+            if contract_list:
+                break
+            res2 = requests.get(f"{BASE_URL.rstrip('/')}{path}", headers=headers, timeout=SERVER_CHECK_TIMEOUT)
+            if res2.status_code == 200:
+                data2, err2 = _parse_response(res2)
+                if not err2:
+                    if isinstance(data2, list):
+                        contract_list = _normalize_contract_list(data2)
+                    elif isinstance(data2, dict):
+                        contract_list = _normalize_contract_list(
+                            data2.get("contract_list") or data2.get("data") or data2.get("contracts") or []
+                        )
     if not contract_list:
         print(f"Dashboard shows {contracts_count} contract(s) but the list could not be loaded. Try again or update the app.")
         return
