@@ -128,12 +128,13 @@ DURATION_OPTIONS_DAYS = [30, 60, 90]
 
 @app.get("/contracts/options")
 def contract_options(db: Session = Depends(get_db)):
-    """List available contract plans and payment address (ERC20)."""
+    """List available contract plans, payment methods, and payment address (ERC20)."""
     plans = db.query(ContractPlan).order_by(ContractPlan.id).all()
     return {
         "plans": [{"id": p.id, "amount": p.amount, "label": p.label or f"${int(p.amount)}"} for p in plans],
         "payment_address_erc20": PAYMENT_ADDRESS_ERC20,
         "duration_options_days": DURATION_OPTIONS_DAYS,
+        "cryptomus_available": cryptomus.is_configured(),
     }
 
 
@@ -191,12 +192,17 @@ def buy_contract(data: dict,
         duration_days = 30
     duration_days = int(duration_days)
     wallet = (data.get("withdrawal_wallet") or "").strip() or None
+    payment_method = (data.get("payment_method") or "").strip().lower() or None  # "cryptomus" | "erc20"
 
     start = datetime.utcnow()
     end = start + timedelta(days=duration_days)
 
-    # Cryptomus flow: create contract, create invoice, return payment_url
-    if cryptomus.is_configured():
+    # Cryptomus flow: only when user chose cryptomus and it is configured
+    use_cryptomus = payment_method == "cryptomus" and cryptomus.is_configured()
+    if payment_method == "cryptomus" and not cryptomus.is_configured():
+        raise HTTPException(status_code=400, detail="Cryptomus payment is not available. Use payment_method=erc20.")
+
+    if use_cryptomus:
         try:
             contract = Contract(
                 user_id=user.id,

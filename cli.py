@@ -174,15 +174,17 @@ def buy():
     if err:
         print(f"❌ {err or 'Could not load contract plans'}")
         return
-    # API returns dict with plans, payment_address_erc20, duration_options_days; or legacy list
+    # API returns dict with plans, payment_address_erc20, duration_options_days, cryptomus_available; or legacy list
     if isinstance(raw, dict):
         options = raw.get("plans") or raw.get("contract_list") or []
         payment_address = raw.get("payment_address_erc20") or "0xD1D0B76F029Af8Bb5aEA1d0D77D061eDdeDfc6ff"
         duration_options = raw.get("duration_options_days") or [30, 60, 90]
+        cryptomus_available = raw.get("cryptomus_available") is True
     else:
         options = raw if isinstance(raw, list) else []
         payment_address = "0xD1D0B76F029Af8Bb5aEA1d0D77D061eDdeDfc6ff"
         duration_options = [30, 60, 90]
+        cryptomus_available = False
     if not options:
         print("❌ No contract plans available")
         return
@@ -215,13 +217,33 @@ def buy():
     except ValueError:
         duration_days = 30
     payload = {"contract_choice": contract_choice, "duration_days": duration_days}
-    res = requests.post(f"{BASE_URL}/buy", headers=auth_headers(), json=payload, timeout=30)
-    data, err = _parse_response(res)
-    detail = (data.get("detail") if isinstance(data, dict) else None) or ""
-    if res.status_code == 400 and ("payment wallet" in detail.lower() or "transaction id" in detail.lower()):
-        print("\n--- Manual payment (ERC20) ---")
-        print(f"   Pay to: {payment_address}")
-        print("   Then enter the wallet and transaction ID below.")
+
+    # Payment method: Cryptomus (link) or ERC20 (pay to address + tx id)
+    if cryptomus_available:
+        print("\n--- Payment method ---")
+        print("  1. Cryptomus – pay via link (contract activates automatically)")
+        print("  2. ERC20 – pay to address below, then enter wallet and transaction ID")
+        pm = input("Choose (1 or 2) [1]: ").strip() or "1"
+        if pm == "2":
+            payload["payment_method"] = "erc20"
+            print(f"\n--- Pay to this address (ERC20) ---")
+            print(f"   {payment_address}")
+            payment_wallet = input("Wallet address used to pay: ").strip()
+            if not payment_wallet:
+                print("❌ Payment wallet is required")
+                return
+            transaction_id = input("Transaction ID of the payment: ").strip()
+            if not transaction_id:
+                print("❌ Transaction ID is required")
+                return
+            payload["payment_wallet"] = payment_wallet
+            payload["payment_tx_id"] = transaction_id
+        else:
+            payload["payment_method"] = "cryptomus"
+    else:
+        payload["payment_method"] = "erc20"
+        print(f"\n--- Pay to this address (ERC20) ---")
+        print(f"   {payment_address}")
         payment_wallet = input("Wallet address used to pay: ").strip()
         if not payment_wallet:
             print("❌ Payment wallet is required")
@@ -232,8 +254,9 @@ def buy():
             return
         payload["payment_wallet"] = payment_wallet
         payload["payment_tx_id"] = transaction_id
-        res = requests.post(f"{BASE_URL}/buy", headers=auth_headers(), json=payload, timeout=30)
-        data, err = _parse_response(res)
+
+    res = requests.post(f"{BASE_URL}/buy", headers=auth_headers(), json=payload, timeout=30)
+    data, err = _parse_response(res)
     if res.status_code == 401:
         print("❌ Session expired or invalid. Please log out (option 7) and log in again.")
         return
