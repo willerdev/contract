@@ -8,6 +8,10 @@ ALTER TABLE contracts ADD COLUMN payment_tx_id VARCHAR(255);
 ALTER TABLE contracts ADD COLUMN duration_days INTEGER;
 ALTER TABLE contracts ADD COLUMN refunded_at TIMESTAMP;
 
+-- Cryptomus: invoice UUID for contract payment, payout UUID for withdrawal
+ALTER TABLE contracts ADD COLUMN cryptomus_invoice_uuid VARCHAR(64);
+ALTER TABLE withdrawals ADD COLUMN cryptomus_payout_uuid VARCHAR(64);
+
 -- Users: withdrawable amount set by system (users cannot withdraw contract principal; only this amount)
 ALTER TABLE users ADD COLUMN available_for_withdraw DOUBLE PRECISION DEFAULT 0;
 

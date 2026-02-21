@@ -1,9 +1,11 @@
 import os
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.responses import JSONResponse
+import json
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text, inspect as sql_inspect
 import bcrypt as bcrypt_lib
 from jose import jwt
 from datetime import datetime, timedelta
@@ -12,11 +14,20 @@ import traceback
 DAILY_RATE = 0.02  # 2% per day
 
 from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode
+import cryptomus
 
 SECRET_KEY = "secret123"
 
 app = FastAPI()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+
+@app.get("/", response_class=HTMLResponse)
+def root():
+    """Cryptomus domain verification: meta tag must be on the page at your project URL."""
+    return """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="cryptomus" content="9094fc19" /></head>
+<body><p>OK</p></body></html>"""
 
 
 @app.exception_handler(Exception)
@@ -144,6 +155,25 @@ def check_columns(db: Session = Depends(get_db)):
         return {"error": str(e)}
 
 
+def _ensure_contract_payment_columns():
+    """Ensure payment_wallet and payment_tx_id columns exist on contracts."""
+    try:
+        inspector = sql_inspect(engine)
+        columns = [col["name"] for col in inspector.get_columns("contracts")]
+        has_wallet = "payment_wallet" in columns
+        has_tx = "payment_tx_id" in columns
+        if not has_wallet or not has_tx:
+            with engine.connect() as conn:
+                if not has_wallet:
+                    conn.execute(text("ALTER TABLE contracts ADD COLUMN payment_wallet VARCHAR(255)"))
+                if not has_tx:
+                    conn.execute(text("ALTER TABLE contracts ADD COLUMN payment_tx_id VARCHAR(255)"))
+                conn.commit()
+        return True
+    except Exception:
+        return False
+
+
 @app.post("/buy")
 def buy_contract(data: dict,
                  user: User = Depends(get_current_user),
@@ -156,44 +186,75 @@ def buy_contract(data: dict,
         raise HTTPException(status_code=400, detail="Invalid contract plan")
     amount = plan.amount
 
+    duration_days = data.get("duration_days")
+    if duration_days not in (30, 60, 90):
+        duration_days = 30
+    duration_days = int(duration_days)
+    wallet = (data.get("withdrawal_wallet") or "").strip() or None
+
+    start = datetime.utcnow()
+    end = start + timedelta(days=duration_days)
+
+    # Cryptomus flow: create contract, create invoice, return payment_url
+    if cryptomus.is_configured():
+        try:
+            contract = Contract(
+                user_id=user.id,
+                status="pending",
+                start_date=start,
+                end_date=end,
+                duration_days=duration_days,
+                wallet=wallet,
+                amount=amount,
+                payment_wallet=None,
+                payment_tx_id=None,
+            )
+            db.add(contract)
+            db.flush()
+            contract_id = contract.id
+            order_id = str(contract_id)
+            webhook_base = cryptomus._get_webhook_base()
+            url_callback = f"{webhook_base}/webhooks/cryptomus/payment"
+            url_success = f"{webhook_base}/payment/success"
+            url_return = f"{webhook_base}/payment/return"
+            result, err = cryptomus.create_invoice(
+                amount=str(int(amount)),
+                order_id=order_id,
+                url_callback=url_callback,
+                currency="USD",
+                url_success=url_success,
+                url_return=url_return,
+            )
+            if err:
+                db.rollback()
+                raise HTTPException(status_code=502, detail=f"Cryptomus: {err}")
+            contract.cryptomus_invoice_uuid = result.get("uuid")
+            db.commit()
+            db.refresh(contract)
+            payment_url = result.get("url") or ""
+            return {
+                "status": "pending_payment",
+                "contract_id": contract.id,
+                "amount": amount,
+                "payment_url": payment_url,
+                "message": "Pay at this link; your contract will activate automatically after payment.",
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to create contract: {str(e)}")
+
+    # Fallback: manual payment (wallet + tx_id required)
     payment_wallet = (data.get("payment_wallet") or data.get("wallet") or "").strip()
     if not payment_wallet:
         raise HTTPException(status_code=400, detail="Payment wallet (wallet used to pay) is required")
     payment_tx_id = (data.get("payment_tx_id") or data.get("transaction_id") or "").strip()
     if not payment_tx_id:
         raise HTTPException(status_code=400, detail="Transaction ID of the payment is required")
-
-    duration_days = data.get("duration_days")
-    if duration_days not in (30, 60, 90):
-        duration_days = 30
-    duration_days = int(duration_days)
-
-    wallet = (data.get("withdrawal_wallet") or "").strip() or None  # optional withdrawal destination
-
-    start = datetime.utcnow()
-    end = start + timedelta(days=duration_days)
-
-    # Step 1: Ensure payment columns exist using engine (separate connection, so no session conflict)
-    from sqlalchemy import text, inspect as sql_inspect
-    columns_exist = False
-    try:
-        inspector = sql_inspect(engine)
-        columns = [col['name'] for col in inspector.get_columns('contracts')]
-        has_payment_wallet = 'payment_wallet' in columns
-        has_payment_tx_id = 'payment_tx_id' in columns
-        if not has_payment_wallet or not has_payment_tx_id:
-            with engine.connect() as conn:
-                if not has_payment_wallet:
-                    conn.execute(text("ALTER TABLE contracts ADD COLUMN payment_wallet VARCHAR(255)"))
-                if not has_payment_tx_id:
-                    conn.execute(text("ALTER TABLE contracts ADD COLUMN payment_tx_id VARCHAR(255)"))
-                conn.commit()
-        columns_exist = True
-    except Exception:
-        columns_exist = False
+    columns_exist = _ensure_contract_payment_columns()
 
     try:
-        # Step 2: Create contract (ORM)
         contract = Contract(
             user_id=user.id,
             status="pending",
@@ -208,34 +269,28 @@ def buy_contract(data: dict,
         db.add(contract)
         db.flush()
         contract_id = contract.id
-
-        # Step 3: Always save payment info via direct SQL (same session, before commit)
         if columns_exist:
             try:
                 db.execute(
                     text("UPDATE contracts SET payment_wallet = :wallet, payment_tx_id = :tx WHERE id = :id"),
-                    {"wallet": payment_wallet, "tx": payment_tx_id, "id": contract_id}
+                    {"wallet": payment_wallet, "tx": payment_tx_id, "id": contract_id},
                 )
             except Exception:
                 pass
-
         db.commit()
         db.refresh(contract)
-
-        # Step 4: Verify saved by reading back
         saved_payment_wallet = None
         saved_payment_tx_id = None
         try:
             row = db.execute(
                 text("SELECT payment_wallet, payment_tx_id FROM contracts WHERE id = :id"),
-                {"id": contract_id}
+                {"id": contract_id},
             ).fetchone()
             if row:
                 saved_payment_wallet = row[0]
                 saved_payment_tx_id = row[1]
         except Exception:
             pass
-        
         response = {
             "status": "Contract submitted for verification",
             "contract_id": contract.id,
@@ -244,15 +299,47 @@ def buy_contract(data: dict,
             "payment_tx_id": saved_payment_tx_id,
             "message": "The system will verify your payment and activate the contract.",
         }
-        
-        # Add warning if payment info wasn't saved
         if not saved_payment_wallet or not saved_payment_tx_id:
-            response["warning"] = "Payment info not saved. Database columns may be missing. Run: ALTER TABLE contracts ADD COLUMN payment_wallet VARCHAR(255); ALTER TABLE contracts ADD COLUMN payment_tx_id VARCHAR(255);"
-        
+            response["warning"] = "Payment info not saved. Database columns may be missing."
         return response
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create contract: {str(e)}")
+
+
+@app.post("/webhooks/cryptomus/payment")
+async def webhook_cryptomus_payment(request: Request, db: Session = Depends(get_db)):
+    """Cryptomus payment webhook: verify sign, then on paid/paid_over activate contract."""
+    try:
+        body = await request.body()
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
+    api_key = (os.environ.get("CRYPTOMUS_PAYMENT_API_KEY") or "").strip()
+    if not cryptomus.verify_webhook_signature(payload, api_key):
+        return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
+    order_id = payload.get("order_id")
+    status = (payload.get("status") or "").strip().lower()
+    txid = payload.get("txid")
+    from_addr = payload.get("from")
+    if not order_id:
+        return JSONResponse(status_code=200, content={"ok": True})
+    try:
+        contract_id = int(order_id)
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=200, content={"ok": True})
+    contract = db.query(Contract).filter(Contract.id == contract_id).first()
+    if not contract:
+        return JSONResponse(status_code=200, content={"ok": True})
+    if status in ("paid", "paid_over"):
+        if contract.status == "pending":
+            contract.status = "active"
+            if txid is not None:
+                contract.payment_tx_id = str(txid) if txid else None
+            if from_addr is not None:
+                contract.payment_wallet = str(from_addr)[:255] if from_addr else None
+            db.commit()
+    return JSONResponse(status_code=200, content={"ok": True})
 
 
 # ================= UPGRADE =================
@@ -666,6 +753,12 @@ def _is_withdraw_window():
     return t.hour >= 23 or t.hour < 1
 
 
+def _get_payout_currency_network():
+    currency = (os.environ.get("CRYPTOMUS_PAYOUT_CURRENCY") or "USDT").strip().upper()
+    network = (os.environ.get("CRYPTOMUS_PAYOUT_NETWORK") or "TRON").strip().upper()
+    return currency, network
+
+
 @app.post("/withdraw")
 def withdraw(data: dict,
              user: User = Depends(get_current_user),
@@ -702,16 +795,78 @@ def withdraw(data: dict,
             status_code=400,
             detail=f"Amount exceeds available for withdrawal ({round(available, 2)}). The system sets your withdrawable amount.",
         )
+
+    if cryptomus.is_payout_configured():
+        currency, network = _get_payout_currency_network()
+        user.available_for_withdraw = available - amount
+        withdrawal = Withdrawal(user_id=user.id, amount=amount, wallet=wallet, status="pending")
+        db.add(withdrawal)
+        db.flush()
+        order_id = str(withdrawal.id)
+        webhook_base = cryptomus._get_webhook_base()
+        url_callback = f"{webhook_base}/webhooks/cryptomus/payout"
+        result, err = cryptomus.create_payout(
+            amount=str(amount),
+            currency=currency,
+            network=network,
+            address=wallet,
+            order_id=order_id,
+            url_callback=url_callback,
+            is_subtract=True,
+        )
+        if err:
+            db.rollback()
+            raise HTTPException(status_code=502, detail=f"Payout failed: {err}")
+        withdrawal.cryptomus_payout_uuid = result.get("uuid")
+        db.commit()
+        return {
+            "status": "Withdrawal submitted",
+            "message": "You will receive crypto to your wallet when the network confirms.",
+        }
+
     user.available_for_withdraw = available - amount
-    withdrawal = Withdrawal(
-        user_id=user.id,
-        amount=amount,
-        wallet=wallet,
-        status="pending"
-    )
+    withdrawal = Withdrawal(user_id=user.id, amount=amount, wallet=wallet, status="pending")
     db.add(withdrawal)
     db.commit()
     return {"status": "Withdrawal request submitted"}
+
+
+@app.post("/webhooks/cryptomus/payout")
+async def webhook_cryptomus_payout(request: Request, db: Session = Depends(get_db)):
+    """Cryptomus payout webhook: verify sign; on final success mark completed, on final failure refund."""
+    try:
+        body = await request.body()
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON"})
+    api_key = (os.environ.get("CRYPTOMUS_PAYOUT_API_KEY") or "").strip()
+    if not cryptomus.verify_webhook_signature(payload, api_key):
+        return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
+    order_id = payload.get("order_id")
+    status = (payload.get("status") or "").strip().lower()
+    is_final = payload.get("is_final") is True
+    if not order_id or not is_final:
+        return JSONResponse(status_code=200, content={"ok": True})
+    try:
+        withdrawal_id = int(order_id)
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=200, content={"ok": True})
+    withdrawal = db.query(Withdrawal).filter(Withdrawal.id == withdrawal_id).first()
+    if not withdrawal:
+        return JSONResponse(status_code=200, content={"ok": True})
+    if withdrawal.status in ("completed", "paid", "failed"):
+        return JSONResponse(status_code=200, content={"ok": True})
+    if status in ("paid", "process", "check", "send"):
+        withdrawal.status = "completed"
+        db.commit()
+        return JSONResponse(status_code=200, content={"ok": True})
+    withdrawal.status = "failed"
+    user = db.query(User).filter(User.id == withdrawal.user_id).first()
+    if user:
+        avail = max(0.0, float(getattr(user, "available_for_withdraw", None) or 0.0))
+        user.available_for_withdraw = avail + (withdrawal.amount or 0)
+    db.commit()
+    return JSONResponse(status_code=200, content={"ok": True})
 
 
 if __name__ == "__main__":

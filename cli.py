@@ -186,8 +186,6 @@ def buy():
     if not options:
         print("❌ No contract plans available")
         return
-    print("\n--- Pay to this address (ERC20 network) ---")
-    print(f"   {payment_address}")
     print("\n--- Contract plans (2% per day) ---")
     valid = []
     for i, p in enumerate(options):
@@ -216,25 +214,26 @@ def buy():
             duration_days = 30
     except ValueError:
         duration_days = 30
-    payment_wallet = input("Wallet address used to pay: ").strip()
-    if not payment_wallet:
-        print("❌ Payment wallet is required")
-        return
-    transaction_id = input("Transaction ID of the payment: ").strip()
-    if not transaction_id:
-        print("❌ Transaction ID is required")
-        return
-    res = requests.post(
-        f"{BASE_URL}/buy",
-        headers=auth_headers(),
-        json={
-            "contract_choice": contract_choice,
-            "duration_days": duration_days,
-            "payment_wallet": payment_wallet,
-            "payment_tx_id": transaction_id,
-        }
-    )
+    payload = {"contract_choice": contract_choice, "duration_days": duration_days}
+    res = requests.post(f"{BASE_URL}/buy", headers=auth_headers(), json=payload, timeout=30)
     data, err = _parse_response(res)
+    detail = (data.get("detail") if isinstance(data, dict) else None) or ""
+    if res.status_code == 400 and ("payment wallet" in detail.lower() or "transaction id" in detail.lower()):
+        print("\n--- Manual payment (ERC20) ---")
+        print(f"   Pay to: {payment_address}")
+        print("   Then enter the wallet and transaction ID below.")
+        payment_wallet = input("Wallet address used to pay: ").strip()
+        if not payment_wallet:
+            print("❌ Payment wallet is required")
+            return
+        transaction_id = input("Transaction ID of the payment: ").strip()
+        if not transaction_id:
+            print("❌ Transaction ID is required")
+            return
+        payload["payment_wallet"] = payment_wallet
+        payload["payment_tx_id"] = transaction_id
+        res = requests.post(f"{BASE_URL}/buy", headers=auth_headers(), json=payload, timeout=30)
+        data, err = _parse_response(res)
     if res.status_code == 401:
         print("❌ Session expired or invalid. Please log out (option 7) and log in again.")
         return
@@ -242,17 +241,19 @@ def buy():
         print(f"❌ {err}")
         return
     if isinstance(data, dict) and "contract_id" in data:
-        print(f"✅ {data.get('message', data.get('status', 'Contract submitted.'))}")
-        print(f"   Contract ID: {data['contract_id']}, Amount: ${data.get('amount', '')}")
-        if data.get("payment_wallet"):
-            print(f"   Payment wallet: {data['payment_wallet']}")
-        if data.get("payment_tx_id"):
-            print(f"   Transaction ID: {data['payment_tx_id']}")
-        if not data.get("payment_wallet") or not data.get("payment_tx_id"):
-            print("   ⚠️  Warning: Payment info may not be saved.")
+        if data.get("payment_url"):
+            print(f"✅ {data.get('message', data.get('status', 'Contract created.'))}")
+            print(f"   Contract ID: {data['contract_id']}, Amount: ${data.get('amount', '')}")
+            print(f"   Pay here: {data['payment_url']}")
+            print("   Your contract will activate automatically after payment.")
         else:
-            print("   ✓ Payment info saved successfully")
-        print("   Contract will be active after the system verifies your payment.")
+            print(f"✅ {data.get('message', data.get('status', 'Contract submitted.'))}")
+            print(f"   Contract ID: {data['contract_id']}, Amount: ${data.get('amount', '')}")
+            if data.get("payment_wallet"):
+                print(f"   Payment wallet: {data['payment_wallet']}")
+            if data.get("payment_tx_id"):
+                print(f"   Transaction ID: {data['payment_tx_id']}")
+            print("   Contract will be active after the system verifies your payment.")
     else:
         print(data if isinstance(data, dict) else res.text)
 
@@ -384,16 +385,19 @@ def withdraw():
     res = requests.post(
         f"{BASE_URL}/withdraw",
         headers=auth_headers(),
-        json={
-            "amount": amount,
-            "wallet": wallet
-        }
+        json={"amount": amount, "wallet": wallet},
+        timeout=30,
     )
     data, err = _parse_response(res)
     if err:
         print(f"❌ {err}")
         return
-    print(data if isinstance(data, dict) else res.text)
+    if isinstance(data, dict):
+        print(f"✅ {data.get('status', 'Done')}")
+        if data.get("message"):
+            print(f"   {data['message']}")
+    else:
+        print(data if isinstance(data, dict) else res.text)
 
 
 def _random_hex(length=12):

@@ -72,6 +72,7 @@ class Contract(Base):
     payment_wallet = Column(String, nullable=True)  # wallet address used to pay
     payment_tx_id = Column(String, nullable=True)  # transaction ID of the payment
     refunded_at = Column(DateTime, nullable=True)  # when amount was refunded to user
+    cryptomus_invoice_uuid = Column(String(64), nullable=True)  # Cryptomus invoice UUID when paying via Cryptomus
 
 
 class Withdrawal(Base):
@@ -82,6 +83,7 @@ class Withdrawal(Base):
     wallet = Column(String)
     status = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    cryptomus_payout_uuid = Column(String(64), nullable=True)  # Cryptomus payout UUID when paying out via Cryptomus
 
 
 class TrustedWallet(Base):
@@ -209,6 +211,20 @@ if _is_sqlite:
                 conn.commit()
     except Exception:
         pass
+    try:
+        if not _column_exists("contracts", "cryptomus_invoice_uuid"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE contracts ADD COLUMN cryptomus_invoice_uuid VARCHAR(64)"))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        if not _column_exists("withdrawals", "cryptomus_payout_uuid"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE withdrawals ADD COLUMN cryptomus_payout_uuid VARCHAR(64)"))
+                conn.commit()
+    except Exception:
+        pass
 else:
     # PostgreSQL/Neon migrations - auto-add missing columns
     try:
@@ -260,6 +276,20 @@ else:
         if not _column_exists("users", "is_banned"):
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT false"))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        if not _column_exists("contracts", "cryptomus_invoice_uuid"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE contracts ADD COLUMN cryptomus_invoice_uuid VARCHAR(64)"))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        if not _column_exists("withdrawals", "cryptomus_payout_uuid"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE withdrawals ADD COLUMN cryptomus_payout_uuid VARCHAR(64)"))
                 conn.commit()
     except Exception:
         pass
