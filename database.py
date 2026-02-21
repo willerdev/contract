@@ -46,6 +46,17 @@ class User(Base):
     email = Column(String, unique=True)
     password = Column(String)
     available_for_withdraw = Column(Float, default=0.0)  # set by system; withdraw limit
+    is_banned = Column(Boolean, default=False)  # banned users cannot log in or use API
+
+
+class PermissionCode(Base):
+    """Valid one-time codes you send to users for sign-up. Checked on register."""
+    __tablename__ = "permission_codes"
+    id = Column(Integer, primary_key=True)
+    code = Column(String(64), unique=True, nullable=False)
+    used_at = Column(DateTime, nullable=True)  # when a user used this code
+    used_by_user_id = Column(Integer, nullable=True)  # which user used it
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Contract(Base):
@@ -191,6 +202,13 @@ if _is_sqlite:
                 conn.commit()
     except Exception:
         pass
+    try:
+        if not _column_exists("users", "is_banned"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0"))
+                conn.commit()
+    except Exception:
+        pass
 else:
     # PostgreSQL/Neon migrations - auto-add missing columns
     try:
@@ -235,6 +253,30 @@ else:
         if not _column_exists("run_sessions", "last_earnings_saved_at"):
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE run_sessions ADD COLUMN last_earnings_saved_at TIMESTAMP"))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        if not _column_exists("users", "is_banned"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT false"))
+                conn.commit()
+    except Exception:
+        pass
+    # permission_codes table created by Base.metadata.create_all; ensure it exists
+    try:
+        inspector = inspect(engine)
+        if "permission_codes" not in inspector.get_table_names():
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE permission_codes (
+                        id SERIAL PRIMARY KEY,
+                        code VARCHAR(64) UNIQUE NOT NULL,
+                        used_at TIMESTAMP,
+                        used_by_user_id INTEGER,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
                 conn.commit()
     except Exception:
         pass

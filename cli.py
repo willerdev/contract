@@ -94,11 +94,16 @@ def _normalize_pin(pin: str) -> str:
 
 
 def register():
+    permission_code = input("Permission code: ").strip()
+    if not permission_code:
+        print("❌ Permission code is required.")
+        return
     email = input("Email: ")
     pin = getpass.getpass("PIN (6 digits): ")
     pin = _normalize_pin(pin)
 
     res = requests.post(f"{BASE_URL}/register", json={
+        "permission_code": permission_code,
         "email": email,
         "pin": pin
     })
@@ -443,14 +448,20 @@ def run_contract():
                             )
                             if not contract_list:
                                 contract_list = _normalize_contract_list(_find_contract_list_in_data(data2))
+                            if contract_list:
+                                data["active_run_contract_id"] = data2.get("active_run_contract_id")
             except Exception:
                 pass
     if not contract_list:
         print(f"Dashboard shows {contracts_count} contract(s) but the list could not be loaded. Try again or update the app.")
         return
+    # Backend says which contract (if any) has an active run — show that so display matches "already running" check
+    active_run_contract_id = data.get("active_run_contract_id")
     print("\n--- Run contract ---")
     for c in contract_list:
-        print(f"  {c.get('id')}. Contract #{c.get('id')} — ${c.get('amount', 0):.0f} ({c.get('status', '?')})")
+        cid = c.get("id")
+        status = "running" if cid == active_run_contract_id else (c.get("status") or "?")
+        print(f"  {cid}. Contract #{cid} — ${c.get('amount', 0):.0f} ({status})")
     choice = input("Choose contract ID to run (or Enter to cancel): ").strip()
     if not choice:
         return

@@ -11,7 +11,7 @@ import traceback
 
 DAILY_RATE = 0.02  # 2% per day
 
-from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings
+from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode
 
 SECRET_KEY = "secret123"
 
@@ -48,6 +48,8 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         user = db.query(User).filter(User.id == payload["user_id"]).first()
         if not user:
             raise HTTPException(status_code=401, detail="Invalid token")
+        if getattr(user, "is_banned", False):
+            raise HTTPException(status_code=403, detail="Account is banned")
         return user
     except HTTPException:
         raise
@@ -72,10 +74,22 @@ def register(data: dict, db: Session = Depends(get_db)):
     email = (data.get("email") or "").strip()
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
+    permission_code = (data.get("permission_code") or "").strip()
+    if not permission_code:
+        raise HTTPException(status_code=400, detail="Permission code required")
+    row = db.query(PermissionCode).filter(
+        PermissionCode.code == permission_code,
+        PermissionCode.used_at == None,
+    ).first()
+    if not row:
+        raise HTTPException(status_code=400, detail="Invalid or already used permission code")
     pin = _normalize_pin(data.get("pin") or data.get("password") or "")
     hashed = bcrypt_lib.hashpw(pin.encode("utf-8"), bcrypt_lib.gensalt()).decode("utf-8")
     user = User(email=email, password=hashed)
     db.add(user)
+    db.flush()  # get user.id without committing
+    row.used_at = datetime.utcnow()
+    row.used_by_user_id = user.id
     try:
         db.commit()
     except IntegrityError:
@@ -91,6 +105,8 @@ def login(data: dict, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == email).first()
     if not user or not bcrypt_lib.checkpw(pin.encode("utf-8"), (user.password or "").encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid email or PIN")
+    if getattr(user, "is_banned", False):
+        raise HTTPException(status_code=403, detail="Account is banned")
     token = create_token(user.id)
     return {"token": token}
 
@@ -284,6 +300,14 @@ def stop_contract(data: dict,
         raise HTTPException(status_code=404, detail="Contract not found")
 
     contract.status = "stopped"
+    # End any active run for this contract so backend and CLI stay in sync
+    now = datetime.utcnow()
+    for session in db.query(RunSession).filter(
+        RunSession.user_id == user.id,
+        RunSession.contract_id == contract_id,
+        RunSession.ended_at == None,
+    ).all():
+        session.ended_at = now
     db.commit()
 
     return {"status": "Contract stopped"}
@@ -337,6 +361,13 @@ def dashboard(user: User = Depends(get_current_user),
         available = 0.0
     available = max(0.0, float(available))
 
+    # So CLI can show "(running)" for the contract that has an active run
+    active_run = db.query(RunSession).filter(
+        RunSession.user_id == user.id,
+        RunSession.ended_at == None,
+    ).first()
+    active_run_contract_id = active_run.contract_id if active_run else None
+
     return {
         "contracts": len(contracts),
         "total_balance": round(total_balance, 2),
@@ -346,6 +377,7 @@ def dashboard(user: User = Depends(get_current_user),
             {"id": c.id, "amount": c.amount, "status": c.status or "pending"}
             for c in contracts
         ],
+        "active_run_contract_id": active_run_contract_id,
     }
 
 
@@ -354,10 +386,17 @@ def list_contracts(user: User = Depends(get_current_user),
                    db: Session = Depends(get_db)):
     """List all user's contracts (for Run menu)."""
     contracts = db.query(Contract).filter(Contract.user_id == user.id).all()
-    return [
-        {"id": c.id, "amount": c.amount, "status": c.status or "pending"}
-        for c in contracts
-    ]
+    active = db.query(RunSession).filter(
+        RunSession.user_id == user.id,
+        RunSession.ended_at == None,
+    ).first()
+    return {
+        "contract_list": [
+            {"id": c.id, "amount": c.amount, "status": c.status or "pending"}
+            for c in contracts
+        ],
+        "active_run_contract_id": active.contract_id if active else None,
+    }
 
 
 # ================= RUN (22h, earnings every 10 min to withdrawables) =================

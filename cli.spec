@@ -1,5 +1,6 @@
 # PyInstaller spec for Contract CLI (single .exe)
-# Run: pyinstaller --noconfirm cli.spec
+# Windows .exe into dist2:  pyinstaller --noconfirm --distpath dist2 --workpath build_win --specpath . cli.spec
+# Or run:  build_win_exe.bat   (on Windows)
 # Build on Windows to get ContractCLI.exe; on Mac you get a Mac binary.
 
 a = Analysis(

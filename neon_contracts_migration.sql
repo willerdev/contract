@@ -11,6 +11,25 @@ ALTER TABLE contracts ADD COLUMN refunded_at TIMESTAMP;
 -- Users: withdrawable amount set by system (users cannot withdraw contract principal; only this amount)
 ALTER TABLE users ADD COLUMN available_for_withdraw DOUBLE PRECISION DEFAULT 0;
 
+-- Users: ban status (banned users cannot log in or use API)
+ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT false;
+
+-- ========== Permission codes (one-time sign-up codes you send to users) ==========
+CREATE TABLE IF NOT EXISTS permission_codes (
+    id SERIAL PRIMARY KEY,
+    code VARCHAR(64) UNIQUE NOT NULL,
+    used_at TIMESTAMP,
+    used_by_user_id INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ========== SYSTEM: Add a new permission code to give to a user ==========
+-- INSERT INTO permission_codes (code) VALUES ('ABC123XYZ');
+-- (Each code works once; after sign-up, used_at and used_by_user_id are set.)
+
+-- ========== SYSTEM: Ban a user ==========
+-- UPDATE users SET is_banned = true WHERE id = <user_id>;
+
 -- ========== SYSTEM: Verify payment and activate a contract ==========
 -- UPDATE contracts SET status = 'active' WHERE id = <contract_id>;
 -- Example: UPDATE contracts SET status = 'active' WHERE id = 5;
