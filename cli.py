@@ -76,6 +76,18 @@ def _normalize_contract_list(raw):
     return out
 
 
+def _find_contract_list_in_data(data):
+    """Recursively find a list of dicts with 'id' (contract list) in dashboard-style response."""
+    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "id" in data[0]:
+        return data
+    if isinstance(data, dict):
+        for v in data.values():
+            found = _find_contract_list_in_data(v)
+            if found:
+                return found
+    return []
+
+
 def _normalize_pin(pin: str) -> str:
     """Keep only digits; server will reject if not exactly 6."""
     return "".join(c for c in (pin or "").strip() if c.isdigit())
@@ -385,6 +397,8 @@ def run_contract():
         or (data.get("contracts") if isinstance(data.get("contracts"), list) else None)
         or ((data.get("data") or {}).get("contract_list") if isinstance(data.get("data"), dict) else None)
     )
+    if not raw_list:
+        raw_list = _find_contract_list_in_data(data)
     contract_list = _normalize_contract_list(raw_list or [])
     # If dashboard didn't include list but says we have contracts, fetch from GET /contracts
     if not contract_list and contracts_count > 0:
@@ -393,16 +407,21 @@ def run_contract():
         for path in ("/contracts", "/contracts/"):
             if contract_list:
                 break
-            res2 = requests.get(f"{BASE_URL.rstrip('/')}{path}", headers=headers, timeout=SERVER_CHECK_TIMEOUT)
-            if res2.status_code == 200:
-                data2, err2 = _parse_response(res2)
-                if not err2:
-                    if isinstance(data2, list):
-                        contract_list = _normalize_contract_list(data2)
-                    elif isinstance(data2, dict):
-                        contract_list = _normalize_contract_list(
-                            data2.get("contract_list") or data2.get("data") or data2.get("contracts") or []
-                        )
+            try:
+                res2 = requests.get(f"{BASE_URL.rstrip('/')}{path}", headers=headers, timeout=SERVER_CHECK_TIMEOUT)
+                if res2.status_code == 200:
+                    data2, err2 = _parse_response(res2)
+                    if not err2:
+                        if isinstance(data2, list):
+                            contract_list = _normalize_contract_list(data2)
+                        elif isinstance(data2, dict):
+                            contract_list = _normalize_contract_list(
+                                data2.get("contract_list") or data2.get("data") or data2.get("contracts") or []
+                            )
+                            if not contract_list:
+                                contract_list = _normalize_contract_list(_find_contract_list_in_data(data2))
+            except Exception:
+                pass
     if not contract_list:
         print(f"Dashboard shows {contracts_count} contract(s) but the list could not be loaded. Try again or update the app.")
         return
