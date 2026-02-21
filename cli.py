@@ -363,7 +363,7 @@ def _random_hex(length=12):
 
 def run_contract():
     """Show which contract to run, then show a 'processing' stream of fake $0.02 transactions."""
-    if not _require_au1234th():
+    if not _require_auth():
         return
     # Use the same dashboard fetch as the Dashboard menu (option 2)
     data, err = _get_dashboard_data()
