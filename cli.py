@@ -439,16 +439,81 @@ def run_contract():
     if cid is None:
         print("❌ Invalid contract ID")
         return
-    print("\nLooking and processing transactions...\n")
+
+    # Start run on server (earnings saved there; survives disconnect/power off)
     import random
     import time
+    import threading
+    res = requests.post(
+        f"{BASE_URL}/run/start",
+        headers=auth_headers(),
+        json={"contract_id": cid},
+        timeout=30
+    )
+    data, err = _parse_response(res)
+    if err or res.status_code != 200:
+        print(f"❌ {err or data.get('detail', res.text)}")
+        return
+    run_id = data.get("run_id")
+    if run_id is None:
+        print("❌ Could not start run.")
+        return
+    run_max_seconds = 22 * 3600
+    print("\n--- Run started (22 hours) ---")
+    print("Earnings are saved on the server. If you disconnect or power off, earnings are kept.")
+    print("Press Enter at any time to stop and add earnings to your withdrawable balance.\n")
+
+    stop_requested = False
+    def wait_for_stop():
+        input()
+        nonlocal stop_requested
+        stop_requested = True
+    t = threading.Thread(target=wait_for_stop, daemon=True)
+    t.start()
+
+    start_time = time.time()
+    last_heartbeat = start_time
+    heartbeat_interval = 120  # 2 minutes
     delays = [1, 2, 5, 10]
-    n = random.randint(8, 15)
-    for i in range(n):
+    while (time.time() - start_time) < run_max_seconds and not stop_requested:
         time.sleep(random.choice(delays))
         tx_id = _random_hex(8) + "..." + _random_hex(8)
         print(f"  [{time.strftime('%H:%M:%S')}] Processing transaction {tx_id}  +$0.02")
-    print("\nRun completed.")
+        # Heartbeat every 2 min so server tracks progress (earnings safe if connection lost)
+        now = time.time()
+        if now - last_heartbeat >= heartbeat_interval:
+            try:
+                r = requests.post(
+                    f"{BASE_URL}/run/heartbeat",
+                    headers=auth_headers(),
+                    json={"run_id": run_id},
+                    timeout=15
+                )
+                d, _ = _parse_response(r)
+                if d and d.get("active") and d.get("earnings_so_far") is not None:
+                    print(f"  ... Earnings so far: ${d.get('earnings_so_far', 0)}")
+                if d and d.get("ended"):
+                    print(f"\n✅ Run completed (22 hours). ${d.get('earnings_added', 0)} added to withdrawable balance.")
+                    return
+            except Exception:
+                pass
+            last_heartbeat = now
+
+    # Stop run and credit earnings
+    try:
+        r = requests.post(
+            f"{BASE_URL}/run/stop",
+            headers=auth_headers(),
+            json={"run_id": run_id},
+            timeout=15
+        )
+        d, _ = _parse_response(r)
+        if d and d.get("earnings_added") is not None:
+            print(f"\n✅ Run stopped. ${d.get('earnings_added', 0)} added to your withdrawable balance.")
+        else:
+            print("\n✅ Run stopped." + (f" {d.get('message', '')}" if isinstance(d, dict) else ""))
+    except Exception as e:
+        print(f"\n✅ Run stopped. (Server stop request failed: {e}. Earnings may have been saved by heartbeat.)")
 
 
 def stop():

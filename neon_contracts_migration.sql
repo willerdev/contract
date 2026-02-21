@@ -19,6 +19,18 @@ ALTER TABLE users ADD COLUMN available_for_withdraw DOUBLE PRECISION DEFAULT 0;
 -- UPDATE users SET available_for_withdraw = <amount> WHERE id = <user_id>;
 -- Example: UPDATE users SET available_for_withdraw = 100.50 WHERE id = 1;
 
+-- ========== Run sessions (22h run, earnings to withdrawables) ==========
+-- Table created automatically by app; run only if missing:
+CREATE TABLE IF NOT EXISTS run_sessions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    contract_id INTEGER NOT NULL,
+    started_at TIMESTAMP NOT NULL,
+    ended_at TIMESTAMP,
+    last_heartbeat_at TIMESTAMP,
+    earnings_added DOUBLE PRECISION DEFAULT 0
+);
+
 -- ========== FIX: Update existing contracts to "pending" (if they were created as "active") ==========
 -- Run this if you have old contracts that were created before the code update:
 -- UPDATE contracts SET status = 'pending' WHERE status = 'active';

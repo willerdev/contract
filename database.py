@@ -87,6 +87,18 @@ class ContractPlan(Base):
     label = Column(String, nullable=True)
 
 
+class RunSession(Base):
+    """Tracks a contract run. Earnings are credited to user when run stops (or after 22h)."""
+    __tablename__ = "run_sessions"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
+    contract_id = Column(Integer)
+    started_at = Column(DateTime)
+    ended_at = Column(DateTime, nullable=True)
+    last_heartbeat_at = Column(DateTime, nullable=True)
+    earnings_added = Column(Float, default=0.0)  # amount added to user.available_for_withdraw
+
+
 # Create tables if they don't exist
 Base.metadata.create_all(engine)
 
