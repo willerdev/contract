@@ -202,18 +202,23 @@ def buy():
         print(data if isinstance(data, dict) else res.text)
 
 
+def _get_dashboard_data():
+    """Fetch dashboard from API (same as dashboard menu). Returns (data dict or None, error or None)."""
+    res = requests.get(f"{BASE_URL}/dashboard", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT)
+    if res.status_code == 401:
+        return None, "Session expired. Please log out and log in again."
+    data, err = _parse_response(res)
+    return data, err
+
+
 def dashboard():
     if not _require_auth():
         return
-    res = requests.get(
-        f"{BASE_URL}/dashboard",
-        headers=auth_headers()
-    )
-    data, err = _parse_response(res)
+    data, err = _get_dashboard_data()
     if err:
         print(f"❌ {err}")
         return
-    print(json.dumps(data, indent=2) if data is not None else res.text)
+    print(json.dumps(data, indent=2) if data is not None else "No data")
 
 
 def withdrawal_history():
@@ -345,31 +350,30 @@ def run_contract():
     """Show which contract to run, then show a 'processing' stream of fake $0.02 transactions."""
     if not _require_auth():
         return
-    timeout = 30
-    headers = auth_headers()
-    contract_list = []
-    # Try dashboard first (has contract_list)
-    res = requests.get(f"{BASE_URL}/dashboard", headers=headers, timeout=timeout)
-    if res.status_code == 401:
-        print("❌ Session expired or invalid. Please log out and log in again.")
+    # Use the same dashboard fetch as the Dashboard menu (option 2)
+    data, err = _get_dashboard_data()
+    if err:
+        print(f"❌ {err}")
         return
-    data, err = _parse_response(res)
-    if not err and isinstance(data, dict):
-        contract_list = data.get("contract_list") or data.get("contractList") or []
-    # Fallback: if contract_list empty but dashboard says we have contracts, try GET /contracts
-    if not contract_list and isinstance(data, dict) and (data.get("contracts") or 0) > 0:
-        res2 = requests.get(f"{BASE_URL}/contracts", headers=headers, timeout=timeout)
-        if res2.status_code == 401:
-            print("❌ Session expired or invalid. Please log out and log in again.")
-            return
-        data2, err2 = _parse_response(res2)
-        if not err2 and isinstance(data2, list):
-            contract_list = data2
+    if not isinstance(data, dict):
+        print("No contracts to run. Buy a contract first.")
+        return
+    # Same logic as dashboard: "contracts" count tells us if user has contracts
+    contracts_count = data.get("contracts") or 0
+    if contracts_count <= 0:
+        print("No contracts to run. Buy a contract first.")
+        return
+    # Get contract list: same source as dashboard (contract_list from dashboard response)
+    contract_list = data.get("contract_list") or data.get("contractList") or []
+    # If dashboard didn't include list but says we have contracts, fetch list from GET /contracts
+    if not contract_list and contracts_count > 0:
+        res2 = requests.get(f"{BASE_URL}/contracts", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT)
+        if res2.status_code == 200:
+            data2, err2 = _parse_response(res2)
+            if not err2 and isinstance(data2, list):
+                contract_list = [c for c in data2 if isinstance(c, dict) and c.get("id") is not None]
     if not contract_list:
-        if err:
-            print(f"❌ {err}")
-        else:
-            print("No contracts to run. Buy a contract first.")
+        print(f"Dashboard shows {contracts_count} contract(s) but the list could not be loaded. Try again or update the app.")
         return
     print("\n--- Run contract ---")
     for c in contract_list:
