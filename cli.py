@@ -165,14 +165,27 @@ def buy():
     if not _require_auth():
         return
     res = requests.get(f"{BASE_URL}/contracts/options")
-    options, err = _parse_response(res)
-    if err or not isinstance(options, list) or not options:
+    raw, err = _parse_response(res)
+    if err:
         print(f"❌ {err or 'Could not load contract plans'}")
         return
+    # API returns dict with plans, payment_address_erc20, duration_options_days; or legacy list
+    if isinstance(raw, dict):
+        options = raw.get("plans") or raw.get("contract_list") or []
+        payment_address = raw.get("payment_address_erc20") or "0xD1D0B76F029Af8Bb5aEA1d0D77D061eDdeDfc6ff"
+        duration_options = raw.get("duration_options_days") or [30, 60, 90]
+    else:
+        options = raw if isinstance(raw, list) else []
+        payment_address = "0xD1D0B76F029Af8Bb5aEA1d0D77D061eDdeDfc6ff"
+        duration_options = [30, 60, 90]
+    if not options:
+        print("❌ No contract plans available")
+        return
+    print("\n--- Pay to this address (ERC20 network) ---")
+    print(f"   {payment_address}")
     print("\n--- Contract plans (2% per day) ---")
     valid = []
     for i, p in enumerate(options):
-        # Support both "id" (new API) and "choice" (legacy), else use 1-based index
         pid = p.get("id") if p.get("id") is not None else p.get("choice")
         if pid is None:
             pid = i + 1
@@ -184,11 +197,20 @@ def buy():
         label = p.get("label") or (f"${int(amt)}" if amt else "?")
         valid.append(str(pid))
         print(f"{pid}. {label}")
-    choice = input(f"Choose ({', '.join(valid)}): ").strip()
+    choice = input(f"Choose plan ({', '.join(valid)}): ").strip()
     if choice not in valid:
         print("❌ Invalid choice")
         return
     contract_choice = int(choice)
+    print(f"\n--- Contract duration (refund after this period) ---")
+    dur_str = ", ".join(str(d) for d in duration_options)
+    duration_input = input(f"Duration in days ({dur_str}) [30]: ").strip() or "30"
+    try:
+        duration_days = int(duration_input)
+        if duration_days not in duration_options:
+            duration_days = 30
+    except ValueError:
+        duration_days = 30
     payment_wallet = input("Wallet address used to pay: ").strip()
     if not payment_wallet:
         print("❌ Payment wallet is required")
@@ -202,6 +224,7 @@ def buy():
         headers=auth_headers(),
         json={
             "contract_choice": contract_choice,
+            "duration_days": duration_days,
             "payment_wallet": payment_wallet,
             "payment_tx_id": transaction_id,
         }

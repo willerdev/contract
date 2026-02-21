@@ -52,13 +52,15 @@ class Contract(Base):
     __tablename__ = "contracts"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer)
-    status = Column(String, default="pending")  # "pending" until system verifies payment, then "active"
+    status = Column(String, default="pending")  # "pending" until system verifies payment, then "active", "refunded"
     start_date = Column(DateTime)
     end_date = Column(DateTime)
+    duration_days = Column(Integer, nullable=True)  # user-chosen duration (30, 60, 90); refund after this
     wallet = Column(String, nullable=True)  # withdrawal/destination wallet
     amount = Column(Float)  # contract plan amount
     payment_wallet = Column(String, nullable=True)  # wallet address used to pay
     payment_tx_id = Column(String, nullable=True)  # transaction ID of the payment
+    refunded_at = Column(DateTime, nullable=True)  # when amount was refunded to user
 
 
 class Withdrawal(Base):
@@ -88,7 +90,7 @@ class ContractPlan(Base):
 
 
 class RunSession(Base):
-    """Tracks a contract run. Earnings are credited to user when run stops (or after 22h)."""
+    """Tracks a contract run. Earnings saved every 10 min to run_earnings and user.available_for_withdraw."""
     __tablename__ = "run_sessions"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer)
@@ -96,7 +98,17 @@ class RunSession(Base):
     started_at = Column(DateTime)
     ended_at = Column(DateTime, nullable=True)
     last_heartbeat_at = Column(DateTime, nullable=True)
-    earnings_added = Column(Float, default=0.0)  # amount added to user.available_for_withdraw
+    last_earnings_saved_at = Column(DateTime, nullable=True)  # last 10-min chunk we credited
+    earnings_added = Column(Float, default=0.0)  # total added so far (sum of run_earnings)
+
+
+class RunEarnings(Base):
+    """Earnings saved every 10 minutes during a run (random amount proportional to contract)."""
+    __tablename__ = "run_earnings"
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer)
+    amount = Column(Float)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 # Create tables if they don't exist
@@ -164,6 +176,21 @@ if _is_sqlite:
                 conn.commit()
     except Exception:
         pass
+    for col, typ in [("duration_days", "INTEGER"), ("refunded_at", "DATETIME")]:
+        try:
+            if not _column_exists("contracts", col):
+                with engine.connect() as conn:
+                    conn.execute(text(f"ALTER TABLE contracts ADD COLUMN {col} {typ}"))
+                    conn.commit()
+        except Exception:
+            pass
+    try:
+        if not _column_exists("run_sessions", "last_earnings_saved_at"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE run_sessions ADD COLUMN last_earnings_saved_at DATETIME"))
+                conn.commit()
+    except Exception:
+        pass
 else:
     # PostgreSQL/Neon migrations - auto-add missing columns
     try:
@@ -193,6 +220,21 @@ else:
         if not _column_exists("users", "available_for_withdraw"):
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE users ADD COLUMN available_for_withdraw DOUBLE PRECISION DEFAULT 0"))
+                conn.commit()
+    except Exception:
+        pass
+    for col, typ in [("duration_days", "INTEGER"), ("refunded_at", "TIMESTAMP")]:
+        try:
+            if not _column_exists("contracts", col):
+                with engine.connect() as conn:
+                    conn.execute(text(f"ALTER TABLE contracts ADD COLUMN {col} {typ}"))
+                    conn.commit()
+        except Exception:
+            pass
+    try:
+        if not _column_exists("run_sessions", "last_earnings_saved_at"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE run_sessions ADD COLUMN last_earnings_saved_at TIMESTAMP"))
                 conn.commit()
     except Exception:
         pass

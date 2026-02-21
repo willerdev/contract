@@ -11,7 +11,7 @@ import traceback
 
 DAILY_RATE = 0.02  # 2% per day
 
-from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession
+from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings
 
 SECRET_KEY = "secret123"
 
@@ -96,12 +96,18 @@ def login(data: dict, db: Session = Depends(get_db)):
 
 
 # ================= BUY CONTRACT =================
+PAYMENT_ADDRESS_ERC20 = "0xD1D0B76F029Af8Bb5aEA1d0D77D061eDdeDfc6ff"
+DURATION_OPTIONS_DAYS = [30, 60, 90]
 
 @app.get("/contracts/options")
 def contract_options(db: Session = Depends(get_db)):
-    """List available contract plans (for CLI display)."""
+    """List available contract plans and payment address (ERC20)."""
     plans = db.query(ContractPlan).order_by(ContractPlan.id).all()
-    return [{"id": p.id, "amount": p.amount, "label": p.label or f"${int(p.amount)}"} for p in plans]
+    return {
+        "plans": [{"id": p.id, "amount": p.amount, "label": p.label or f"${int(p.amount)}"} for p in plans],
+        "payment_address_erc20": PAYMENT_ADDRESS_ERC20,
+        "duration_options_days": DURATION_OPTIONS_DAYS,
+    }
 
 
 @app.get("/contracts/check-columns")
@@ -141,10 +147,15 @@ def buy_contract(data: dict,
     if not payment_tx_id:
         raise HTTPException(status_code=400, detail="Transaction ID of the payment is required")
 
+    duration_days = data.get("duration_days")
+    if duration_days not in (30, 60, 90):
+        duration_days = 30
+    duration_days = int(duration_days)
+
     wallet = (data.get("withdrawal_wallet") or "").strip() or None  # optional withdrawal destination
 
     start = datetime.utcnow()
-    end = start + timedelta(days=30)
+    end = start + timedelta(days=duration_days)
 
     # Step 1: Ensure payment columns exist using engine (separate connection, so no session conflict)
     from sqlalchemy import text, inspect as sql_inspect
@@ -172,6 +183,7 @@ def buy_contract(data: dict,
             status="pending",
             start_date=start,
             end_date=end,
+            duration_days=duration_days,
             wallet=wallet,
             amount=amount,
             payment_wallet=payment_wallet if columns_exist else None,
@@ -289,9 +301,32 @@ def _contract_balance(contract, now=None):
     return (contract.amount or 0) * (1 + DAILY_RATE * days)
 
 
+def _process_refunds(user_id: int, db: Session):
+    """Refund contract amount to user's available_for_withdraw when end_date has passed."""
+    now = datetime.utcnow()
+    to_refund = db.query(Contract).filter(
+        Contract.user_id == user_id,
+        Contract.end_date <= now,
+        Contract.refunded_at == None,
+        Contract.status == "active",
+    ).all()
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return
+    for c in to_refund:
+        avail = max(0.0, float(getattr(user, "available_for_withdraw", None) or 0.0))
+        user.available_for_withdraw = avail + (c.amount or 0)
+        c.refunded_at = now
+        c.status = "refunded"
+    if to_refund:
+        db.commit()
+        db.refresh(user)
+
+
 @app.get("/dashboard")
 def dashboard(user: User = Depends(get_current_user),
               db: Session = Depends(get_db)):
+    _process_refunds(user.id, db)
     db.refresh(user)
     contracts = db.query(Contract).filter(Contract.user_id == user.id).all()
     withdrawals = db.query(Withdrawal).filter(Withdrawal.user_id == user.id).all()
@@ -325,17 +360,20 @@ def list_contracts(user: User = Depends(get_current_user),
     ]
 
 
-# ================= RUN (22h, earnings to withdrawables) =================
+# ================= RUN (22h, earnings every 10 min to withdrawables) =================
+import random as _random
 RUN_MAX_HOURS = 22
-RUN_EARNINGS_PER_TX = 0.02
-RUN_SECONDS_PER_TX = 4  # average seconds between $0.02 transactions
+RUN_EARNINGS_INTERVAL_SEC = 600  # save earnings every 10 minutes
+# Random base amounts (bigger contract = more earn via scale)
+RUN_EARNINGS_BASE_AMOUNTS = [0.012, 0.02, 0.072, 0.08, 0.015, 0.03, 0.05, 0.04]
+RUN_EARNINGS_SCALE_BASE = 2000.0  # contract.amount / this = scale factor
 
 
-def _run_earnings(seconds_run):
-    """Earnings from run: $0.02 per transaction, 1 tx every RUN_SECONDS_PER_TX sec, capped at 22h."""
-    cap = RUN_MAX_HOURS * 3600
-    s = min(float(seconds_run), cap)
-    return round((s / RUN_SECONDS_PER_TX) * RUN_EARNINGS_PER_TX, 2)
+def _run_random_earnings_chunk(contract_amount: float):
+    """One 10-min chunk: random amount proportional to contract size."""
+    base = _random.choice(RUN_EARNINGS_BASE_AMOUNTS)
+    scale = max(0.5, (contract_amount or 2000) / RUN_EARNINGS_SCALE_BASE)
+    return round(base * scale, 4)
 
 
 @app.post("/run/start")
@@ -384,7 +422,7 @@ def run_start(data: dict,
 def run_heartbeat(data: dict,
                   user: User = Depends(get_current_user),
                   db: Session = Depends(get_db)):
-    """Update last heartbeat. Call every few minutes while run is active. Returns earnings so far."""
+    """Update last heartbeat. Every 10 min save random earnings to user. Returns earnings so far."""
     run_id = data.get("run_id")
     if run_id is not None:
         session = db.query(RunSession).filter(
@@ -399,28 +437,39 @@ def run_heartbeat(data: dict,
         ).first()
     if not session:
         return {"active": False, "message": "No active run."}
+    contract = db.query(Contract).filter(
+        Contract.id == session.contract_id,
+        Contract.user_id == user.id
+    ).first()
+    contract_amount = (contract.amount or 2000) if contract else 2000
     now = datetime.utcnow()
     session.last_heartbeat_at = now
-    # Auto-end if over 22 hours
     elapsed = (now - session.started_at).total_seconds()
+    # Auto-end if over 22 hours
     if elapsed >= RUN_MAX_HOURS * 3600:
         session.ended_at = now
-        earnings = _run_earnings(elapsed)
-        session.earnings_added = earnings
-        db.refresh(user)
-        avail = getattr(user, "available_for_withdraw", None) or 0.0
-        user.available_for_withdraw = avail + earnings
         db.commit()
-        return {"active": False, "ended": True, "earnings_added": earnings, "message": "Run completed (22 hours)."}
+        return {"active": False, "ended": True, "earnings_added": session.earnings_added, "message": "Run completed (22 hours)."}
+    # Save earnings every 10 min: catch up any missed chunks
+    chunks_done = int(elapsed / RUN_EARNINGS_INTERVAL_SEC)
+    existing = db.query(RunEarnings).filter(RunEarnings.run_id == session.id).count()
+    db.refresh(user)
+    for _ in range(existing, chunks_done):
+        amt = _run_random_earnings_chunk(contract_amount)
+        user.available_for_withdraw = (getattr(user, "available_for_withdraw", None) or 0) + amt
+        db.add(RunEarnings(run_id=session.id, amount=amt))
+        session.earnings_added = (session.earnings_added or 0) + amt
+    if chunks_done > existing:
+        session.last_earnings_saved_at = now
     db.commit()
-    earnings_so_far = _run_earnings(elapsed)
+    db.refresh(session)
     return {
         "active": True,
         "run_id": session.id,
         "contract_id": session.contract_id,
         "started_at": session.started_at.isoformat(),
         "elapsed_seconds": int(elapsed),
-        "earnings_so_far": earnings_so_far,
+        "earnings_so_far": round(session.earnings_added or 0, 2),
         "max_hours": RUN_MAX_HOURS,
     }
 
@@ -429,7 +478,7 @@ def run_heartbeat(data: dict,
 def run_stop(data: dict,
              user: User = Depends(get_current_user),
              db: Session = Depends(get_db)):
-    """Stop the current run and add earnings to user's available_for_withdraw."""
+    """Stop the current run; credit any remaining 10-min chunks and final partial chunk."""
     run_id = data.get("run_id")
     if run_id is not None:
         session = db.query(RunSession).filter(
@@ -444,26 +493,39 @@ def run_stop(data: dict,
         ).first()
     if not session:
         return {"active": False, "earnings_added": 0, "message": "No active run to stop."}
+    contract = db.query(Contract).filter(
+        Contract.id == session.contract_id,
+        Contract.user_id == user.id
+    ).first()
+    contract_amount = (contract.amount or 2000) if contract else 2000
     now = datetime.utcnow()
     session.ended_at = now
     elapsed = (now - session.started_at).total_seconds()
-    earnings = _run_earnings(elapsed)
-    session.earnings_added = earnings
-    db.refresh(user)  # get latest user.available_for_withdraw
-    avail = max(0.0, float(getattr(user, "available_for_withdraw", None) or 0.0))
-    user.available_for_withdraw = avail + earnings
+    chunks_done = int(elapsed / RUN_EARNINGS_INTERVAL_SEC)
+    existing = db.query(RunEarnings).filter(RunEarnings.run_id == session.id).count()
+    db.refresh(user)
+    for _ in range(existing, chunks_done):
+        amt = _run_random_earnings_chunk(contract_amount)
+        user.available_for_withdraw = (getattr(user, "available_for_withdraw", None) or 0) + amt
+        db.add(RunEarnings(run_id=session.id, amount=amt))
+        session.earnings_added = (session.earnings_added or 0) + amt
+    # One final chunk for partial period
+    amt = _run_random_earnings_chunk(contract_amount)
+    user.available_for_withdraw = (getattr(user, "available_for_withdraw", None) or 0) + amt
+    db.add(RunEarnings(run_id=session.id, amount=amt))
+    session.earnings_added = (session.earnings_added or 0) + amt
     db.commit()
     return {
         "active": False,
-        "earnings_added": earnings,
-        "message": f"Run stopped. ${earnings} added to your withdrawable balance.",
+        "earnings_added": round(session.earnings_added or 0, 2),
+        "message": f"Run stopped. ${round(session.earnings_added or 0, 2)} added to your withdrawable balance.",
     }
 
 
 @app.get("/run/status")
 def run_status(user: User = Depends(get_current_user),
                db: Session = Depends(get_db)):
-    """Get current run status. If run is over 22h, auto-complete and credit earnings."""
+    """Get current run status. If run is over 22h, auto-complete (earnings already saved every 10 min)."""
     session = db.query(RunSession).filter(
         RunSession.user_id == user.id,
         RunSession.ended_at == None
@@ -474,20 +536,16 @@ def run_status(user: User = Depends(get_current_user),
     elapsed = (now - session.started_at).total_seconds()
     if elapsed >= RUN_MAX_HOURS * 3600:
         session.ended_at = now
-        earnings = _run_earnings(elapsed)
-        session.earnings_added = earnings
-        db.refresh(user)
-        avail = getattr(user, "available_for_withdraw", None) or 0.0
-        user.available_for_withdraw = avail + earnings
         db.commit()
-        return {"active": False, "ended": True, "earnings_added": earnings}
+        return {"active": False, "ended": True, "earnings_added": session.earnings_added}
+    db.refresh(session)
     return {
         "active": True,
         "run_id": session.id,
         "contract_id": session.contract_id,
         "started_at": session.started_at.isoformat(),
         "elapsed_seconds": int(elapsed),
-        "earnings_so_far": _run_earnings(elapsed),
+        "earnings_so_far": round(session.earnings_added or 0, 2),
         "max_hours": RUN_MAX_HOURS,
     }
 

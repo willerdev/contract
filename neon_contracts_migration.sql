@@ -4,6 +4,10 @@
 ALTER TABLE contracts ADD COLUMN payment_wallet VARCHAR(255);
 ALTER TABLE contracts ADD COLUMN payment_tx_id VARCHAR(255);
 
+-- Contracts: duration and refund
+ALTER TABLE contracts ADD COLUMN duration_days INTEGER;
+ALTER TABLE contracts ADD COLUMN refunded_at TIMESTAMP;
+
 -- Users: withdrawable amount set by system (users cannot withdraw contract principal; only this amount)
 ALTER TABLE users ADD COLUMN available_for_withdraw DOUBLE PRECISION DEFAULT 0;
 
@@ -19,8 +23,7 @@ ALTER TABLE users ADD COLUMN available_for_withdraw DOUBLE PRECISION DEFAULT 0;
 -- UPDATE users SET available_for_withdraw = <amount> WHERE id = <user_id>;
 -- Example: UPDATE users SET available_for_withdraw = 100.50 WHERE id = 1;
 
--- ========== Run sessions (22h run, earnings to withdrawables) ==========
--- Table created automatically by app; run only if missing:
+-- ========== Run sessions (22h run, earnings every 10 min to withdrawables) ==========
 CREATE TABLE IF NOT EXISTS run_sessions (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL,
@@ -28,8 +31,20 @@ CREATE TABLE IF NOT EXISTS run_sessions (
     started_at TIMESTAMP NOT NULL,
     ended_at TIMESTAMP,
     last_heartbeat_at TIMESTAMP,
-    earnings_added DOUBLE PRECISION DEFAULT 0
+    earnings_added DOUBLE PRECISION DEFAULT 0,
+    last_earnings_saved_at TIMESTAMP
 );
+
+-- ========== Run earnings (one row per 10-min chunk) ==========
+CREATE TABLE IF NOT EXISTS run_earnings (
+    id SERIAL PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES run_sessions(id),
+    amount DOUBLE PRECISION NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- If run_sessions already existed without last_earnings_saved_at, add it (ignore if exists):
+ALTER TABLE run_sessions ADD COLUMN last_earnings_saved_at TIMESTAMP;
 
 -- ========== FIX: Update existing contracts to "pending" (if they were created as "active") ==========
 -- Run this if you have old contracts that were created before the code update:
