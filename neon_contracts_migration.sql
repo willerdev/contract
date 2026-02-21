@@ -69,6 +69,19 @@ CREATE TABLE IF NOT EXISTS run_earnings (
 -- If run_sessions already existed without last_earnings_saved_at, add it (ignore if exists):
 ALTER TABLE run_sessions ADD COLUMN last_earnings_saved_at TIMESTAMP;
 
+-- ========== PIN reset (forgot PIN flow; admin creates code, user submits with new PIN) ==========
+CREATE TABLE IF NOT EXISTS pin_reset_codes (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    code VARCHAR(64) UNIQUE NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    used_at TIMESTAMP
+);
+
+-- ========== ENV: For cron refunds and admin PIN reset ==========
+-- Set CRON_SECRET and call GET /cron/process-refunds?key=<CRON_SECRET> (e.g. from Render Cron).
+-- Set ADMIN_SECRET and use header X-Admin-Key to call POST /admin/create-pin-reset (body: {"email": "user@example.com"}).
+
 -- ========== FIX: Update existing contracts to "pending" (if they were created as "active") ==========
 -- Run this if you have old contracts that were created before the code update:
 -- UPDATE contracts SET status = 'pending' WHERE status = 'active';

@@ -1,16 +1,16 @@
 @echo off
-REM Build ContractCLI.exe for Windows and place it in dist2/
-REM Run this on Windows (e.g. in Command Prompt or PowerShell from the project root).
-REM Prerequisites: pip install -r requirements-build.txt
+REM Build ContractCLI.exe for Windows. Run this on Windows from the project folder.
+REM Requires: Python installed, then:  pip install -r requirements-build.txt
 
+echo Building ContractCLI.exe for Windows...
 if not exist dist2 mkdir dist2
 
 pyinstaller --noconfirm --distpath dist2 --workpath build_win --specpath . cli.spec
 
 if %ERRORLEVEL% EQU 0 (
     echo.
-    echo Build complete. Output: dist2\ContractCLI.exe
+    echo Build complete. Run: dist2\ContractCLI.exe
 ) else (
-    echo Build failed.
+    echo Build failed. Install deps with: pip install -r requirements-build.txt
     exit /b 1
 )

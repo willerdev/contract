@@ -124,6 +124,16 @@ class RunEarnings(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class PinResetCode(Base):
+    """One-time code for PIN reset. Admin creates; user submits with new PIN."""
+    __tablename__ = "pin_reset_codes"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    code = Column(String(64), unique=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+
+
 # Create tables if they don't exist
 Base.metadata.create_all(engine)
 
@@ -305,6 +315,22 @@ else:
                         used_at TIMESTAMP,
                         used_by_user_id INTEGER,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        inspector2 = inspect(engine)
+        if "pin_reset_codes" not in inspector2.get_table_names():
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE pin_reset_codes (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        code VARCHAR(64) UNIQUE NOT NULL,
+                        expires_at TIMESTAMP NOT NULL,
+                        used_at TIMESTAMP
                     )
                 """))
                 conn.commit()

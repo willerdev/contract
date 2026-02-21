@@ -1,3 +1,4 @@
+import sys
 import requests
 import getpass
 import json
@@ -119,6 +120,77 @@ def register():
         if isinstance(data, dict) and data.get("error"):
             msg = f"{msg} ({data['error']})"
         print("❌", msg)
+
+
+def change_pin():
+    if not _require_auth():
+        return
+    current = getpass.getpass("Current PIN (6 digits): ")
+    current = _normalize_pin(current)
+    if len(current) != 6:
+        print("❌ PIN must be exactly 6 digits.")
+        return
+    new_pin = getpass.getpass("New PIN (6 digits): ")
+    new_pin = _normalize_pin(new_pin)
+    if len(new_pin) != 6:
+        print("❌ New PIN must be exactly 6 digits.")
+        return
+    confirm = getpass.getpass("Confirm new PIN: ")
+    confirm = _normalize_pin(confirm)
+    if new_pin != confirm:
+        print("❌ New PIN and confirmation do not match.")
+        return
+    res = requests.post(
+        f"{BASE_URL}/change-pin",
+        headers=auth_headers(),
+        json={"current_pin": current, "new_pin": new_pin},
+        timeout=30,
+    )
+    data, err = _parse_response(res)
+    if err:
+        print(f"❌ {err}")
+        return
+    if res.status_code in (200, 201):
+        print("✅", data.get("message", "PIN changed successfully"))
+    else:
+        print("❌", data.get("detail", data) if isinstance(data, dict) else res.text)
+
+
+def reset_pin():
+    """Forgot PIN: set new PIN using a one-time code from admin."""
+    print("\n--- Reset PIN (forgot PIN) ---")
+    print("Get a one-time code from the administrator, then enter it below.")
+    email = input("Email: ").strip()
+    if not email:
+        print("❌ Email required")
+        return
+    code = input("Reset code (from admin): ").strip()
+    if not code:
+        print("❌ Reset code required")
+        return
+    new_pin = getpass.getpass("New PIN (6 digits): ")
+    new_pin = _normalize_pin(new_pin)
+    if len(new_pin) != 6:
+        print("❌ PIN must be exactly 6 digits.")
+        return
+    confirm = getpass.getpass("Confirm new PIN: ")
+    confirm = _normalize_pin(confirm)
+    if new_pin != confirm:
+        print("❌ PIN and confirmation do not match.")
+        return
+    res = requests.post(
+        f"{BASE_URL}/reset-pin",
+        json={"email": email, "reset_code": code, "new_pin": new_pin},
+        timeout=30,
+    )
+    data, err = _parse_response(res)
+    if err:
+        print(f"❌ {err}")
+        return
+    if res.status_code in (200, 201):
+        print("✅", data.get("message", "PIN reset successfully. You can log in with your new PIN."))
+    else:
+        print("❌", data.get("detail", data) if isinstance(data, dict) else res.text)
 
 
 def login():
@@ -387,6 +459,8 @@ def withdraw():
     dash_data, _ = _parse_response(dash)
     available = dash_data.get("available", 0) if isinstance(dash_data, dict) else 0
     print(f"Available for withdrawal (set by system): ${available}")
+    win = (dash_data.get("withdraw_window") if isinstance(dash_data, dict) else None) or {}
+    print(f"Withdraw window: {win.get('message', '23:00–01:00 UTC')}")
     res = requests.get(f"{BASE_URL}/wallets", headers=auth_headers())
     data, err = _parse_response(res)
     wallets = (data if not err and data else []) or []
@@ -429,7 +503,7 @@ def _random_hex(length=12):
 
 
 def run_contract():
-    """Show which contract to run, then show a 'processing' stream of fake $0.02 transactions."""
+    """Show which contract to run, then show a 'processing' stream with random amounts under $0.20."""
     if not _require_auth():
         return
     # Use the same dashboard fetch as the Dashboard menu (option 2)
@@ -536,10 +610,13 @@ def run_contract():
     last_heartbeat = start_time
     heartbeat_interval = 120  # 2 minutes
     delays = [1, 2, 5, 10]
+    # Random display amounts under $0.20 (actual earnings are saved on server every 10 min)
+    display_amounts = [0.02, 0.05, 0.07, 0.08, 0.10, 0.12, 0.15, 0.18, 0.20, 0.03, 0.06, 0.09, 0.11, 0.14, 0.17]
     while (time.time() - start_time) < run_max_seconds and not stop_requested:
         time.sleep(random.choice(delays))
         tx_id = _random_hex(8) + "..." + _random_hex(8)
-        print(f"  [{time.strftime('%H:%M:%S')}] Processing transaction {tx_id}  +$0.02")
+        amt = random.choice(display_amounts)
+        print(f"  [{time.strftime('%H:%M:%S')}] Processing transaction {tx_id}  +${amt:.2f}")
         # Heartbeat every 2 min so server tracks progress (earnings safe if connection lost)
         now = time.time()
         if now - last_heartbeat >= heartbeat_interval:
@@ -611,16 +688,18 @@ def menu():
             print("5. My wallets")
             print("6. Stop Contract")
             print("7. Run")
-            print("8. Log out")
-            print("9. Exit")
+            print("8. Change PIN")
+            print("9. Log out")
+            print("10. Exit")
         else:
             print("1. Register")
             print("2. Login")
-            print("3. Buy Contract")
-            print("4. Dashboard")
-            print("5. Withdraw")
-            print("6. Stop Contract")
-            print("7. Exit")
+            print("3. Forgot PIN")
+            print("4. Buy Contract")
+            print("5. Dashboard")
+            print("6. Withdraw")
+            print("7. Stop Contract")
+            print("8. Exit")
 
         choice = input("Choose: ").strip()
 
@@ -640,8 +719,10 @@ def menu():
             elif choice == "7":
                 run_contract()
             elif choice == "8":
-                logout()
+                change_pin()
             elif choice == "9":
+                logout()
+            elif choice == "10":
                 break
             else:
                 print("Invalid choice")
@@ -651,20 +732,38 @@ def menu():
             elif choice == "2":
                 login()
             elif choice == "3":
-                buy()
+                reset_pin()
             elif choice == "4":
-                dashboard()
+                buy()
             elif choice == "5":
-                withdraw()
+                dashboard()
             elif choice == "6":
-                stop()
+                withdraw()
             elif choice == "7":
+                stop()
+            elif choice == "8":
                 break
             else:
                 print("Invalid choice")
 
 
+def _pause_if_exe():
+    """Keep console open when exe exits so user can read errors (PyInstaller sets sys.frozen)."""
+    if getattr(sys, "frozen", False):
+        input("\nPress Enter to close...")
+
 if __name__ == "__main__":
-    print("Checking server... (may take up to a minute if it's waking up)")
-    _check_server()
-    menu()
+    try:
+        print("Checking server... (may take up to a minute if it's waking up)")
+        _check_server()
+        menu()
+    except SystemExit:
+        _pause_if_exe()
+        raise
+    except Exception as e:
+        print("Error:", e)
+        import traceback
+        traceback.print_exc()
+        _pause_if_exe()
+        sys.exit(1)
+    _pause_if_exe()

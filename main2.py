@@ -1,5 +1,9 @@
 import os
 import json
+import time
+import secrets
+import threading
+from collections import defaultdict
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.security import OAuth2PasswordBearer
@@ -8,12 +12,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import text, inspect as sql_inspect
 import bcrypt as bcrypt_lib
 from jose import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 import traceback
 
 DAILY_RATE = 0.02  # 2% per day
 
-from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode
+from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode, PinResetCode
 import cryptomus
 
 SECRET_KEY = "secret123"
@@ -30,6 +34,16 @@ def root():
 <body><p>OK</p></body></html>"""
 
 
+@app.get("/health")
+def health(db: Session = Depends(get_db)):
+    """For Render and load balancers. Returns 200 if app and DB are reachable."""
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "unhealthy", "database": "error"})
+    return {"status": "ok", "database": "ok"}
+
+
 @app.exception_handler(Exception)
 def unhandled_exception_handler(request, exc):
     """Ensure every error returns JSON so the CLI can parse it."""
@@ -38,6 +52,43 @@ def unhandled_exception_handler(request, exc):
         status_code=500,
         content={"detail": "Internal Server Error", "error": str(exc)},
     )
+
+
+# ================= RATE LIMITING (in-memory) =================
+_rate_limit_store = defaultdict(list)
+_rate_limit_lock = threading.Lock()
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_LOGIN_REGISTER = 10
+RATE_LIMIT_CHANGE_PIN = 5
+
+
+def _rate_limit_key(request: Request, path_tag: str) -> str:
+    client = getattr(request, "client", None)
+    ip = client.host if client else "unknown"
+    return f"{ip}:{path_tag}"
+
+
+def _rate_limit_allow(key: str, limit: int) -> bool:
+    now = time.time()
+    with _rate_limit_lock:
+        times = _rate_limit_store[key]
+        times[:] = [t for t in times if now - t < RATE_LIMIT_WINDOW]
+        if len(times) >= limit:
+            return False
+        times.append(now)
+    return True
+
+
+def rate_limit_login_register(request: Request):
+    key = _rate_limit_key(request, "auth")
+    if not _rate_limit_allow(key, RATE_LIMIT_LOGIN_REGISTER):
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again in a minute.")
+
+
+def rate_limit_change_pin(request: Request):
+    key = _rate_limit_key(request, "change_pin")
+    if not _rate_limit_allow(key, RATE_LIMIT_CHANGE_PIN):
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again in a minute.")
 
 
 # ================= UTILS =================
@@ -81,7 +132,8 @@ def _normalize_pin(raw: str) -> str:
 
 
 @app.post("/register")
-def register(data: dict, db: Session = Depends(get_db)):
+def register(request: Request, data: dict, db: Session = Depends(get_db)):
+    rate_limit_login_register(request)
     email = (data.get("email") or "").strip()
     if not email:
         raise HTTPException(status_code=400, detail="Email required")
@@ -110,7 +162,8 @@ def register(data: dict, db: Session = Depends(get_db)):
 
 
 @app.post("/login")
-def login(data: dict, db: Session = Depends(get_db)):
+def login(request: Request, data: dict, db: Session = Depends(get_db)):
+    rate_limit_login_register(request)
     email = (data.get("email") or "").strip()
     pin = _normalize_pin(data.get("pin") or data.get("password") or "")
     user = db.query(User).filter(User.email == email).first()
@@ -120,6 +173,49 @@ def login(data: dict, db: Session = Depends(get_db)):
         raise HTTPException(status_code=403, detail="Account is banned")
     token = create_token(user.id)
     return {"token": token}
+
+
+@app.post("/reset-pin")
+def reset_pin(request: Request, data: dict, db: Session = Depends(get_db)):
+    """Forgot PIN: set new PIN using a one-time code (from admin). Rate-limited."""
+    rate_limit_login_register(request)
+    email = (data.get("email") or "").strip()
+    code = (data.get("reset_code") or data.get("code") or "").strip()
+    new_pin = _normalize_pin(data.get("new_pin") or data.get("pin") or "")
+    if not email or not code:
+        raise HTTPException(status_code=400, detail="email and reset_code required")
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid email or code")
+    row = db.query(PinResetCode).filter(
+        PinResetCode.user_id == user.id,
+        PinResetCode.code == code,
+        PinResetCode.used_at == None,
+        PinResetCode.expires_at > datetime.utcnow(),
+    ).first()
+    if not row:
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+    hashed = bcrypt_lib.hashpw(new_pin.encode("utf-8"), bcrypt_lib.gensalt()).decode("utf-8")
+    user.password = hashed
+    row.used_at = datetime.utcnow()
+    db.commit()
+    return {"message": "PIN reset successfully"}
+
+
+@app.post("/change-pin")
+def change_pin(request: Request, data: dict,
+               user: User = Depends(get_current_user),
+               db: Session = Depends(get_db)):
+    """Change PIN: requires current PIN and new PIN (6 digits)."""
+    rate_limit_change_pin(request)
+    current_pin = _normalize_pin(data.get("current_pin") or data.get("pin") or data.get("password") or "")
+    new_pin = _normalize_pin(data.get("new_pin") or "")
+    if not bcrypt_lib.checkpw(current_pin.encode("utf-8"), (user.password or "").encode("utf-8")):
+        raise HTTPException(status_code=401, detail="Current PIN is incorrect")
+    hashed = bcrypt_lib.hashpw(new_pin.encode("utf-8"), bcrypt_lib.gensalt()).decode("utf-8")
+    user.password = hashed
+    db.commit()
+    return {"message": "PIN changed successfully"}
 
 
 # ================= BUY CONTRACT =================
@@ -471,6 +567,7 @@ def dashboard(user: User = Depends(get_current_user),
             for c in contracts
         ],
         "active_run_contract_id": active_run_contract_id,
+        "withdraw_window": _withdraw_window_info(),
     }
 
 
@@ -499,6 +596,12 @@ RUN_EARNINGS_INTERVAL_SEC = 600  # save earnings every 10 minutes
 # Random base amounts (bigger contract = more earn via scale)
 RUN_EARNINGS_BASE_AMOUNTS = [0.012, 0.02, 0.072, 0.08, 0.015, 0.03, 0.05, 0.04]
 RUN_EARNINGS_SCALE_BASE = 2000.0  # contract.amount / this = scale factor
+SECONDS_PER_DAY = 86400
+
+
+def _max_run_earnings_for_elapsed(contract_amount: float, elapsed_seconds: float) -> float:
+    """Max earnings for this run = 2% per day prorated by elapsed time. Never exceed daily cap."""
+    return round((contract_amount or 0) * DAILY_RATE * (elapsed_seconds / SECONDS_PER_DAY), 4)
 
 
 def _run_random_earnings_chunk(contract_amount: float):
@@ -582,17 +685,37 @@ def run_heartbeat(data: dict,
         session.ended_at = now
         db.commit()
         return {"active": False, "ended": True, "earnings_added": session.earnings_added, "message": "Run completed (22 hours)."}
-    # Save earnings every 10 min: catch up any missed chunks
+    cap = _max_run_earnings_for_elapsed(contract_amount, elapsed)
+    current_earnings = session.earnings_added or 0
+    if current_earnings >= cap:
+        session.ended_at = now
+        db.commit()
+        return {"active": False, "ended": True, "earnings_added": current_earnings, "message": "Run stopped automatically: daily earnings cap (2%) reached."}
+    # Save earnings every 10 min: catch up any missed chunks (respect 2% daily cap)
     chunks_done = int(elapsed / RUN_EARNINGS_INTERVAL_SEC)
     existing = db.query(RunEarnings).filter(RunEarnings.run_id == session.id).count()
     db.refresh(user)
+    ended_at_cap = False
     for _ in range(existing, chunks_done):
         amt = _run_random_earnings_chunk(contract_amount)
+        current_earnings = session.earnings_added or 0
+        if current_earnings + amt > cap:
+            amt = max(0, round(cap - current_earnings, 4))
+            if amt <= 0:
+                ended_at_cap = True
+                break
         user.available_for_withdraw = (getattr(user, "available_for_withdraw", None) or 0) + amt
         db.add(RunEarnings(run_id=session.id, amount=amt))
         session.earnings_added = (session.earnings_added or 0) + amt
-    if chunks_done > existing:
+        if (session.earnings_added or 0) >= cap:
+            ended_at_cap = True
+            break
+    if chunks_done > existing and not ended_at_cap:
         session.last_earnings_saved_at = now
+    if ended_at_cap:
+        session.ended_at = now
+        db.commit()
+        return {"active": False, "ended": True, "earnings_added": session.earnings_added, "message": "Run stopped automatically: daily earnings cap (2%) reached."}
     db.commit()
     db.refresh(session)
     return {
@@ -633,19 +756,32 @@ def run_stop(data: dict,
     now = datetime.utcnow()
     session.ended_at = now
     elapsed = (now - session.started_at).total_seconds()
+    cap = _max_run_earnings_for_elapsed(contract_amount, elapsed)
     chunks_done = int(elapsed / RUN_EARNINGS_INTERVAL_SEC)
     existing = db.query(RunEarnings).filter(RunEarnings.run_id == session.id).count()
     db.refresh(user)
     for _ in range(existing, chunks_done):
+        current = session.earnings_added or 0
+        if current >= cap:
+            break
         amt = _run_random_earnings_chunk(contract_amount)
+        if current + amt > cap:
+            amt = max(0, round(cap - current, 4))
+        if amt <= 0:
+            break
         user.available_for_withdraw = (getattr(user, "available_for_withdraw", None) or 0) + amt
         db.add(RunEarnings(run_id=session.id, amount=amt))
         session.earnings_added = (session.earnings_added or 0) + amt
-    # One final chunk for partial period
-    amt = _run_random_earnings_chunk(contract_amount)
-    user.available_for_withdraw = (getattr(user, "available_for_withdraw", None) or 0) + amt
-    db.add(RunEarnings(run_id=session.id, amount=amt))
-    session.earnings_added = (session.earnings_added or 0) + amt
+    # One final chunk for partial period (capped)
+    current = session.earnings_added or 0
+    if current < cap:
+        amt = _run_random_earnings_chunk(contract_amount)
+        if current + amt > cap:
+            amt = max(0, round(cap - current, 4))
+        if amt > 0:
+            user.available_for_withdraw = (getattr(user, "available_for_withdraw", None) or 0) + amt
+            db.add(RunEarnings(run_id=session.id, amount=amt))
+            session.earnings_added = (session.earnings_added or 0) + amt
     db.commit()
     return {
         "active": False,
@@ -754,9 +890,92 @@ def remove_wallet(wallet_id: int,
 
 def _is_withdraw_window():
     """Withdrawals allowed only between 11pm (23:00) and 1am (01:00) server local time."""
-    from datetime import datetime as dt
-    t = dt.now().time()
+    t = datetime.utcnow().time()
     return t.hour >= 23 or t.hour < 1
+
+
+def _withdraw_window_info():
+    """Return is_open, next_opens_at (iso), next_closes_at (iso), message. Uses UTC."""
+    now = datetime.utcnow()
+    today = now.date()
+    # Window: 23:00–01:00 UTC
+    opens_today = datetime.combine(today, dtime(23, 0))
+    closes_tomorrow = datetime.combine(today + timedelta(days=1), dtime(1, 0))
+    if now.hour < 1:
+        # We're in the window that opened yesterday 23:00, closes today 01:00
+        closes_today = datetime.combine(today, dtime(1, 0))
+        is_open = True
+        next_opens_at = opens_today.isoformat() + "Z"
+        next_closes_at = closes_today.isoformat() + "Z"
+        message = "Withdrawals open until 01:00 UTC."
+    elif now.hour >= 23:
+        is_open = True
+        next_opens_at = now.isoformat() + "Z"
+        next_closes_at = closes_tomorrow.isoformat() + "Z"
+        message = "Withdrawals open until 01:00 UTC."
+    else:
+        is_open = False
+        next_opens_at = opens_today.isoformat() + "Z"
+        next_closes_at = closes_tomorrow.isoformat() + "Z"
+        message = "Withdrawals open 23:00–01:00 UTC. Next window at " + next_opens_at
+    return {"is_open": is_open, "next_opens_at": next_opens_at, "next_closes_at": next_closes_at, "message": message}
+
+
+@app.get("/withdraw/window")
+def withdraw_window():
+    """Return current withdraw window status and next open/close times (UTC). No auth required."""
+    return _withdraw_window_info()
+
+
+# ================= CRON (scheduled refunds) =================
+
+def _require_admin(request: Request):
+    admin_secret = (os.environ.get("ADMIN_SECRET") or "").strip()
+    if not admin_secret:
+        raise HTTPException(status_code=503, detail="Admin not configured")
+    provided = request.headers.get("x-admin-key") or request.query_params.get("admin_key") or ""
+    if provided != admin_secret:
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+
+
+@app.post("/admin/create-pin-reset")
+def admin_create_pin_reset(request: Request, data: dict, db: Session = Depends(get_db)):
+    """Create a one-time PIN reset code for a user (by email). Requires X-Admin-Key header."""
+    _require_admin(request)
+    email = (data.get("email") or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="email required")
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    code = secrets.token_urlsafe(16)
+    expires_at = datetime.utcnow() + timedelta(hours=1)
+    row = PinResetCode(user_id=user.id, code=code, expires_at=expires_at)
+    db.add(row)
+    db.commit()
+    return {"code": code, "expires_in_minutes": 60, "email": email}
+
+
+@app.get("/cron/process-refunds")
+def cron_process_refunds(request: Request, db: Session = Depends(get_db)):
+    """Run refunds for all users with due contracts. Call from Render Cron or external scheduler.
+    Requires query param key=CRON_SECRET or header X-Cron-Secret."""
+    secret = (os.environ.get("CRON_SECRET") or "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Cron not configured")
+    provided = request.query_params.get("key") or request.headers.get("x-cron-secret") or ""
+    if provided != secret:
+        raise HTTPException(status_code=403, detail="Invalid key")
+    now = datetime.utcnow()
+    due = db.query(Contract).filter(
+        Contract.end_date <= now,
+        Contract.refunded_at == None,
+        Contract.status == "active",
+    ).all()
+    user_ids = list({c.user_id for c in due})
+    for uid in user_ids:
+        _process_refunds(uid, db)
+    return {"refunded_users": len(user_ids), "contracts_due": len(due)}
 
 
 def _get_payout_currency_network():
