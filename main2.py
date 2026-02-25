@@ -20,6 +20,7 @@ DAILY_RATE = 0.02  # 2% per day
 
 from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode, PinResetCode, TelegramLinkToken, TradingAccount, AccountManagementPayment
 import cryptomus
+import bybit
 import metaapi
 
 SECRET_KEY = "secret123"
@@ -982,6 +983,22 @@ def withdraw_window():
     return _withdraw_window_info()
 
 
+@app.get("/outbound-ip")
+def outbound_ip():
+    """
+    Return the outbound IP Bybit (and any external API) sees when this server makes requests.
+    Use this IP in Bybit API key IP whitelist. No auth required.
+    """
+    try:
+        r = requests_lib.get("https://api.ipify.org?format=json", timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        ip = data.get("ip") or ""
+        return {"outbound_ip": ip, "note": "Whitelist this IP in Bybit API key settings (API Management → IP restriction)."}
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"detail": str(e), "outbound_ip": None})
+
+
 # ================= ACCOUNT MANAGEMENT ($50 for Telegram + Trading access) =================
 @app.get("/account-management/requirements")
 def account_management_requirements():
@@ -1412,6 +1429,22 @@ def withdraw(data: dict,
             db.rollback()
             raise HTTPException(status_code=502, detail=f"Payout failed: {err}")
         withdrawal.cryptomus_payout_uuid = result.get("uuid")
+        db.commit()
+        return {
+            "status": "Withdrawal submitted",
+            "message": "You will receive crypto to your wallet when the network confirms.",
+        }
+
+    if bybit.is_configured():
+        user.available_for_withdraw = available - amount
+        withdrawal = Withdrawal(user_id=user.id, amount=amount, wallet=wallet, status="pending")
+        db.add(withdrawal)
+        db.flush()
+        bybit_id, err = bybit.create_withdraw(wallet, str(amount), request_id=str(withdrawal.id))
+        if err:
+            db.rollback()
+            raise HTTPException(status_code=502, detail=f"Bybit withdrawal failed: {err}")
+        withdrawal.status = "completed"
         db.commit()
         return {
             "status": "Withdrawal submitted",
