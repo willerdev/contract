@@ -38,6 +38,17 @@ def _sign(secret: str, payload: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _server_outbound_ip() -> str:
+    """Get this server's outbound IP (so user can whitelist the exact IP Bybit sees)."""
+    try:
+        r = requests.get("https://api.ipify.org?format=json", timeout=3)
+        if r.ok:
+            return (r.json() or {}).get("ip") or "unknown"
+    except Exception:
+        pass
+    return "unknown"
+
+
 def create_withdraw(address: str, amount: str, request_id: str = None) -> tuple:
     """
     Submit on-chain withdrawal. Returns (withdrawal_id, None) on success or (None, error_msg).
@@ -78,11 +89,12 @@ def create_withdraw(address: str, amount: str, request_id: str = None) -> tuple:
         try:
             data = json.loads(raw) if raw else {}
         except json.JSONDecodeError:
-            snippet = (raw[:200] + "…") if len(raw) > 200 else raw
+            server_ip = _server_outbound_ip()
+            snippet = (raw[:120] + "…") if len(raw) > 120 else (raw or "(empty)")
             return None, (
                 f"Bybit returned non-JSON (status {r.status_code}). "
-                "Check API key IP whitelist (add Render IP from /outbound-ip). "
-                f"Response: {snippet or '(empty)'}"
+                f"Add this IP in Bybit API key IP restriction: {server_ip}. "
+                f"Response: {snippet}"
             )
         ret_code = data.get("retCode", -1)
         ret_msg = data.get("retMsg", "")
@@ -92,6 +104,9 @@ def create_withdraw(address: str, amount: str, request_id: str = None) -> tuple:
         err = ret_msg or data.get("retExtInfo") or str(data)
         if "whitelist" in str(err).lower() or ("address" in str(err).lower() and "book" in str(err).lower()):
             return None, "Address not in Bybit address book. Add it at https://www.bybit.com/user/assets/money-address"
+        if ret_code == 10010 or "unmatched ip" in str(err).lower() or "ip" in str(err).lower():
+            server_ip = _server_outbound_ip()
+            return None, f"{err} Add this IP in Bybit API key IP restriction: {server_ip}"
         return None, err
     except requests.RequestException as e:
         return None, str(e)
