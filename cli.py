@@ -57,7 +57,15 @@ def _parse_response(res):
     if not res.text or not res.text.strip():
         return None, f"Server returned empty response (status {res.status_code})"
     try:
-        return res.json(), None
+        data = res.json()
+        if res.status_code >= 400:
+            detail = data.get("detail")
+            if isinstance(detail, dict) and detail.get("code") == "telegram_trading_requirement":
+                return data, "telegram_trading_requirement"  # caller will show requirement
+            if isinstance(detail, dict):
+                return data, detail.get("message") or str(detail)
+            return data, str(detail) if detail is not None else f"Error {res.status_code}"
+        return data, None
     except json.JSONDecodeError:
         return None, f"Server response not JSON (status {res.status_code}): {res.text[:200]}"
 
@@ -486,11 +494,27 @@ def telegram_connect():
 def trading_accounts_menu():
     if not _require_auth():
         return
+    res = requests.get(f"{BASE_URL}/trading-accounts", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT)
+    data, err = _parse_response(res)
+    if err:
+        if err == "telegram_trading_requirement" and data:
+            _print_telegram_trading_requirement(data)
+            print("To get access: start a contract (Run) or choose « Pay for Account Management » in the menu.")
+        else:
+            print(f"❌ {err}")
+            if res.status_code == 503:
+                print("   (Run neon_telegram_trading_migration.sql on Neon and set METAAPI_TOKEN on the server.)")
+            elif res.status_code == 502:
+                print("   (MetaAPI error: check login, password, server. Server name is case-sensitive.)")
+        return
     while True:
-        res = requests.get(f"{BASE_URL}/trading-accounts", headers=auth_headers())
+        res = requests.get(f"{BASE_URL}/trading-accounts", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT)
         data, err = _parse_response(res)
         if err:
-            print(f"❌ {err}")
+            if err == "telegram_trading_requirement" and data:
+                _print_telegram_trading_requirement(data)
+            else:
+                print(f"❌ {err}")
             return
         accounts = (data.get("trading_accounts") if isinstance(data, dict) else []) or []
         print("\n--- Trading accounts ---")
@@ -522,7 +546,12 @@ def trading_accounts_menu():
             })
             d, e = _parse_response(res)
             if e:
-                print(f"❌ {e}")
+                if e == "telegram_trading_requirement" and d:
+                    _print_telegram_trading_requirement(d)
+                else:
+                    print(f"❌ {e}")
+                    if res.status_code == 502:
+                        print("   (Check login, password, server. Use exact server name from your broker, e.g. BrokerName-Demo.)")
             else:
                 print("✅ Account added. Balance will show after MetaAPI connects.")
         elif choice == "2":
@@ -540,6 +569,48 @@ def trading_accounts_menu():
             return
         else:
             print("Invalid choice")
+
+
+def account_management_pay():
+    """Show Account Management fee and payment address; submit user's ERC20 payment for verification."""
+    if not _require_auth():
+        return
+    res = requests.get(f"{BASE_URL}/dashboard", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT)
+    dash_data, _ = _parse_response(res)
+    if isinstance(dash_data, dict) and dash_data.get("account_management_paid_at"):
+        print("✅ You already have Account Management access.")
+        return
+    res = requests.get(f"{BASE_URL}/account-management/requirements", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT)
+    data, err = _parse_response(res)
+    if err:
+        print(f"❌ {err}")
+        if res.status_code == 404:
+            print("   (Server may need an update. Deploy the latest code.)")
+        elif res.status_code == 503:
+            print("   (Run neon_telegram_trading_migration.sql on Neon, then redeploy.)")
+        return
+    print("\n--- Account Management ($50 one-time) ---")
+    print(data.get("summary") or data.get("message", ""))
+    print(f"\n  Pay ${data.get('fee_amount', 50)} {data.get('fee_currency', 'USDT')} (ERC20) to:")
+    print(f"  {data.get('payment_address_erc20', '')}")
+    print("\n  After payment, enter the wallet you used and the transaction ID below.")
+    print("  Access will be granted after verification.\n")
+    wallet = input("Wallet address you used to pay: ").strip()
+    tx_id = input("Transaction ID: ").strip()
+    if not wallet or not tx_id:
+        print("❌ Wallet and transaction ID required.")
+        return
+    res = requests.post(f"{BASE_URL}/account-management/submit-payment", headers=auth_headers(), json={
+        "payment_wallet": wallet,
+        "payment_tx_id": tx_id,
+    }, timeout=SERVER_CHECK_TIMEOUT)
+    data, err = _parse_response(res)
+    if err:
+        print(f"❌ {err}")
+        if res.status_code == 503:
+            print("   Run neon_telegram_trading_migration.sql on your Neon database, then redeploy the server.")
+        return
+    print(data.get("message") or "Submitted. You will get access after verification.")
 
 
 def withdraw():
@@ -780,9 +851,10 @@ def menu():
             print("7. Run")
             print("8. Connect Telegram")
             print("9. Trading accounts")
-            print("10. Change PIN")
-            print("11. Log out")
-            print("12. Exit")
+            print("10. Pay for Account Management ($50)")
+            print("11. Change PIN")
+            print("12. Log out")
+            print("13. Exit")
         else:
             print("1. Register")
             print("2. Login")
@@ -815,10 +887,12 @@ def menu():
             elif choice == "9":
                 trading_accounts_menu()
             elif choice == "10":
-                change_pin()
+                account_management_pay()
             elif choice == "11":
-                logout()
+                change_pin()
             elif choice == "12":
+                logout()
+            elif choice == "13":
                 break
             else:
                 print("Invalid choice")

@@ -18,7 +18,7 @@ import traceback
 
 DAILY_RATE = 0.02  # 2% per day
 
-from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode, PinResetCode, TelegramLinkToken, TradingAccount
+from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode, PinResetCode, TelegramLinkToken, TradingAccount, AccountManagementPayment
 import cryptomus
 import metaapi
 
@@ -223,6 +223,31 @@ def change_pin(request: Request, data: dict,
 # ================= BUY CONTRACT =================
 PAYMENT_ADDRESS_ERC20 = "0xD1D0B76F029Af8Bb5aEA1d0D77D061eDdeDfc6ff"
 DURATION_OPTIONS_DAYS = [30, 60, 90]
+ACCOUNT_MANAGEMENT_FEE = 50.0
+ACCOUNT_MANAGEMENT_FEE_CURRENCY = "USDT"
+
+
+def _user_has_active_contract(db: Session, user_id: int) -> bool:
+    """True if user has a run session that is not ended."""
+    run = db.query(RunSession).filter(RunSession.user_id == user_id, RunSession.ended_at == None).first()
+    return run is not None
+
+
+def _user_has_account_management(user: User) -> bool:
+    """True if user has paid the $50 account management fee."""
+    return bool(getattr(user, "account_management_paid_at", None))
+
+
+def _can_use_telegram_or_trading(user: User, db: Session) -> bool:
+    """True if user can connect Telegram and use Trading accounts: active contract OR paid account management."""
+    return _user_has_active_contract(db, user.id) or _user_has_account_management(user)
+
+
+REQUIREMENT_MESSAGE = (
+    "To use Telegram notifications or Trading accounts you need either: "
+    "(1) an active contract running, or (2) pay a one-time Account Management fee of $50 (ERC20). "
+    "Pay to the ERC20 address below and submit your transaction ID; after verification you will get access."
+)
 
 @app.get("/contracts/options")
 def contract_options(db: Session = Depends(get_db)):
@@ -237,6 +262,12 @@ def contract_options(db: Session = Depends(get_db)):
         "cryptomus_available": cryptomus.is_configured(),
         "telegram_available": telegram_available,
         "metaapi_available": metaapi_available,
+        "account_management_requirement": {
+            "message": REQUIREMENT_MESSAGE,
+            "fee_amount": ACCOUNT_MANAGEMENT_FEE,
+            "fee_currency": ACCOUNT_MANAGEMENT_FEE_CURRENCY,
+            "payment_address_erc20": PAYMENT_ADDRESS_ERC20,
+        },
     }
 
 
@@ -568,6 +599,8 @@ def dashboard(user: User = Depends(get_current_user),
 
     telegram_linked = bool(getattr(user, "telegram_chat_id", None))
     trading_accounts_count = db.query(TradingAccount).filter(TradingAccount.user_id == user.id).count()
+    eligible_telegram_trading = _can_use_telegram_or_trading(user, db)
+    account_management_paid_at = getattr(user, "account_management_paid_at", None)
 
     return {
         "contracts": len(contracts),
@@ -582,6 +615,14 @@ def dashboard(user: User = Depends(get_current_user),
         "withdraw_window": _withdraw_window_info(),
         "telegram_linked": telegram_linked,
         "trading_accounts_count": trading_accounts_count,
+        "eligible_telegram_trading": eligible_telegram_trading,
+        "account_management_paid_at": account_management_paid_at.isoformat() if account_management_paid_at else None,
+        "telegram_trading_requirement": None if eligible_telegram_trading else {
+            "message": REQUIREMENT_MESSAGE,
+            "fee_amount": ACCOUNT_MANAGEMENT_FEE,
+            "fee_currency": ACCOUNT_MANAGEMENT_FEE_CURRENCY,
+            "payment_address_erc20": PAYMENT_ADDRESS_ERC20,
+        },
     }
 
 
@@ -941,6 +982,92 @@ def withdraw_window():
     return _withdraw_window_info()
 
 
+# ================= ACCOUNT MANAGEMENT ($50 for Telegram + Trading access) =================
+@app.get("/account-management/requirements")
+def account_management_requirements():
+    """What is required to use Telegram and Trading accounts. No auth required."""
+    return {
+        "message": REQUIREMENT_MESSAGE,
+        "fee_amount": ACCOUNT_MANAGEMENT_FEE,
+        "fee_currency": ACCOUNT_MANAGEMENT_FEE_CURRENCY,
+        "payment_address_erc20": PAYMENT_ADDRESS_ERC20,
+        "summary": "You need either an active contract running, or pay a one-time $50 Account Management fee (ERC20) to connect Telegram and use Trading accounts.",
+    }
+
+
+@app.post("/account-management/submit-payment")
+def account_management_submit(
+    data: dict,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Submit ERC20 payment details for Account Management. Admin verifies and grants access."""
+    if _user_has_account_management(user):
+        return {"status": "already_paid", "message": "You already have Account Management access."}
+    payment_wallet = (data.get("payment_wallet") or data.get("wallet") or "").strip()
+    payment_tx_id = (data.get("payment_tx_id") or data.get("transaction_id") or "").strip()
+    if not payment_wallet or not payment_tx_id:
+        raise HTTPException(status_code=400, detail="payment_wallet and payment_tx_id required")
+    try:
+        db.add(AccountManagementPayment(
+            user_id=user.id,
+            amount=ACCOUNT_MANAGEMENT_FEE,
+            payment_wallet=payment_wallet,
+            payment_tx_id=payment_tx_id,
+            status="pending",
+        ))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        if "account_management_payments" in str(e) or "does not exist" in str(e).lower() or "column" in str(e).lower():
+            raise HTTPException(
+                status_code=503,
+                detail="Database migration missing. Run neon_telegram_trading_migration.sql on your Neon database, then redeploy.",
+            )
+        raise
+    return {
+        "status": "pending",
+        "message": "Payment submitted. After verification you will get access to Telegram and Trading accounts.",
+    }
+
+
+@app.post("/admin/verify-account-management")
+def admin_verify_account_management(request: Request, data: dict, db: Session = Depends(get_db)):
+    """Mark a user's Account Management payment as verified (X-Admin-Key). Body: user_id or payment_id."""
+    _require_admin(request)
+    user_id = data.get("user_id")
+    payment_id = data.get("payment_id")
+    if payment_id is not None:
+        pay = db.query(AccountManagementPayment).filter(AccountManagementPayment.id == payment_id).first()
+        if not pay:
+            raise HTTPException(status_code=404, detail="Payment not found")
+        user_id = pay.user_id
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="user_id or payment_id required")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    now = datetime.utcnow()
+    try:
+        user.account_management_paid_at = now
+        for pay in db.query(AccountManagementPayment).filter(
+            AccountManagementPayment.user_id == user_id,
+            AccountManagementPayment.status == "pending",
+        ).all():
+            pay.status = "verified"
+            pay.verified_at = now
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        if "account_management" in str(e) or "does not exist" in str(e).lower():
+            raise HTTPException(
+                status_code=503,
+                detail="Database migration missing. Run neon_telegram_trading_migration.sql on Neon.",
+            )
+        raise
+    return {"ok": True, "user_id": user_id, "message": "Account Management access granted."}
+
+
 # ================= TELEGRAM =================
 TELEGRAM_LINK_TOKEN_EXPIRY_SECONDS = 900  # 15 minutes
 
@@ -977,6 +1104,7 @@ def telegram_link_request(user: User = Depends(get_current_user), db: Session = 
     """Create a one-time link token. User opens the deep link in Telegram and sends /start TOKEN to link."""
     if not _telegram_bot_token():
         raise HTTPException(status_code=503, detail="Telegram not configured")
+    _require_telegram_trading_eligibility(user, db)
     link_token = secrets.token_urlsafe(24)
     expires_at = datetime.utcnow() + timedelta(seconds=TELEGRAM_LINK_TOKEN_EXPIRY_SECONDS)
     db.add(TelegramLinkToken(user_id=user.id, token=link_token, expires_at=expires_at))
@@ -992,12 +1120,17 @@ def telegram_link_request(user: User = Depends(get_current_user), db: Session = 
 
 
 @app.get("/telegram/status")
-def telegram_status(user: User = Depends(get_current_user)):
-    """Return whether the user has linked Telegram."""
+def telegram_status(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return whether the user has linked Telegram and if they are eligible to connect."""
     linked = bool(getattr(user, "telegram_chat_id", None))
+    eligible = _can_use_telegram_or_trading(user, db)
     return {
         "linked": linked,
         "telegram_username": getattr(user, "telegram_username", None) or None,
+        "eligible": eligible,
+        "requirement": None if eligible else REQUIREMENT_MESSAGE,
+        "account_management_fee": ACCOUNT_MANAGEMENT_FEE if not eligible else None,
+        "payment_address_erc20": PAYMENT_ADDRESS_ERC20 if not eligible else None,
     }
 
 
@@ -1062,6 +1195,22 @@ async def webhook_telegram(request: Request, db: Session = Depends(get_db)):
 
 
 # ================= TRADING ACCOUNTS (MetaAPI) =================
+def _require_telegram_trading_eligibility(user: User, db: Session):
+    """Raise 403 with requirement detail if user cannot use Telegram or Trading features."""
+    if _can_use_telegram_or_trading(user, db):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": "telegram_trading_requirement",
+            "message": REQUIREMENT_MESSAGE,
+            "fee_amount": ACCOUNT_MANAGEMENT_FEE,
+            "fee_currency": ACCOUNT_MANAGEMENT_FEE_CURRENCY,
+            "payment_address_erc20": PAYMENT_ADDRESS_ERC20,
+        },
+    )
+
+
 @app.post("/trading-accounts")
 def trading_accounts_add(
     data: dict,
@@ -1071,6 +1220,7 @@ def trading_accounts_add(
     """Add a MetaTrader account (login, password, server). MetaAPI stores the connection; we store only id + login + server."""
     if not metaapi.is_configured():
         raise HTTPException(status_code=503, detail="Trading accounts not configured (METAAPI_TOKEN)")
+    _require_telegram_trading_eligibility(user, db)
     login = (data.get("login") or "").strip()
     password = data.get("password") or ""
     server = (data.get("server") or "").strip()
@@ -1102,7 +1252,13 @@ def trading_accounts_add(
 @app.get("/trading-accounts")
 def trading_accounts_list(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """List user's trading accounts with current balance from MetaAPI."""
-    accounts = db.query(TradingAccount).filter(TradingAccount.user_id == user.id).all()
+    _require_telegram_trading_eligibility(user, db)
+    try:
+        accounts = db.query(TradingAccount).filter(TradingAccount.user_id == user.id).all()
+    except Exception as e:
+        if "trading_accounts" in str(e) or "does not exist" in str(e).lower():
+            raise HTTPException(status_code=503, detail="Run neon_telegram_trading_migration.sql on Neon, then redeploy.")
+        raise
     result = []
     for acc in accounts:
         info, err = metaapi.get_account_information(acc.metaapi_account_id)

@@ -49,6 +49,7 @@ class User(Base):
     is_banned = Column(Boolean, default=False)  # banned users cannot log in or use API
     telegram_chat_id = Column(String(32), nullable=True)  # linked Telegram chat for notifications
     telegram_username = Column(String(128), nullable=True)
+    account_management_paid_at = Column(DateTime, nullable=True)  # when user paid $50 for Telegram + Trading access
 
 
 class PermissionCode(Base):
@@ -159,6 +160,19 @@ class TradingAccount(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class AccountManagementPayment(Base):
+    """$50 one-time payment (ERC20) for Telegram + Trading access when user has no active contract."""
+    __tablename__ = "account_management_payments"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    amount = Column(Float, nullable=False)
+    payment_wallet = Column(String(255), nullable=True)
+    payment_tx_id = Column(String(255), nullable=True)
+    status = Column(String(32), default="pending")  # pending | verified
+    verified_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 # Create tables if they don't exist
 Base.metadata.create_all(engine)
 
@@ -257,6 +271,13 @@ if _is_sqlite:
         if not _column_exists("withdrawals", "cryptomus_payout_uuid"):
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE withdrawals ADD COLUMN cryptomus_payout_uuid VARCHAR(64)"))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        if not _column_exists("users", "account_management_paid_at"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN account_management_paid_at DATETIME"))
                 conn.commit()
     except Exception:
         pass
@@ -398,6 +419,32 @@ else:
                         server VARCHAR(128) NOT NULL,
                         label VARCHAR(128),
                         platform VARCHAR(8) DEFAULT 'mt5',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        if not _column_exists("users", "account_management_paid_at"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN account_management_paid_at TIMESTAMP"))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        insp3 = inspect(engine)
+        if "account_management_payments" not in insp3.get_table_names():
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE account_management_payments (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        amount DOUBLE PRECISION NOT NULL,
+                        payment_wallet VARCHAR(255),
+                        payment_tx_id VARCHAR(255),
+                        status VARCHAR(32) DEFAULT 'pending',
+                        verified_at TIMESTAMP,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """))
