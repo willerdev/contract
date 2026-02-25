@@ -1364,12 +1364,6 @@ def cron_process_refunds(request: Request, db: Session = Depends(get_db)):
     return {"refunded_users": len(user_ids), "contracts_due": len(due)}
 
 
-def _get_payout_currency_network():
-    currency = (os.environ.get("CRYPTOMUS_PAYOUT_CURRENCY") or "USDT").strip().upper()
-    network = (os.environ.get("CRYPTOMUS_PAYOUT_NETWORK") or "TRON").strip().upper()
-    return currency, network
-
-
 @app.post("/withdraw")
 def withdraw(data: dict,
              user: User = Depends(get_current_user),
@@ -1406,34 +1400,6 @@ def withdraw(data: dict,
             status_code=400,
             detail=f"Amount exceeds available for withdrawal ({round(available, 2)}). The system sets your withdrawable amount.",
         )
-
-    if cryptomus.is_payout_configured():
-        currency, network = _get_payout_currency_network()
-        user.available_for_withdraw = available - amount
-        withdrawal = Withdrawal(user_id=user.id, amount=amount, wallet=wallet, status="pending")
-        db.add(withdrawal)
-        db.flush()
-        order_id = str(withdrawal.id)
-        webhook_base = cryptomus._get_webhook_base()
-        url_callback = f"{webhook_base}/webhooks/cryptomus/payout"
-        result, err = cryptomus.create_payout(
-            amount=str(amount),
-            currency=currency,
-            network=network,
-            address=wallet,
-            order_id=order_id,
-            url_callback=url_callback,
-            is_subtract=True,
-        )
-        if err:
-            db.rollback()
-            raise HTTPException(status_code=502, detail=f"Payout failed: {err}")
-        withdrawal.cryptomus_payout_uuid = result.get("uuid")
-        db.commit()
-        return {
-            "status": "Withdrawal submitted",
-            "message": "You will receive crypto to your wallet when the network confirms.",
-        }
 
     if bybit.is_configured():
         user.available_for_withdraw = available - amount
