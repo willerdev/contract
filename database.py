@@ -47,6 +47,8 @@ class User(Base):
     password = Column(String)
     available_for_withdraw = Column(Float, default=0.0)  # set by system; withdraw limit
     is_banned = Column(Boolean, default=False)  # banned users cannot log in or use API
+    telegram_chat_id = Column(String(32), nullable=True)  # linked Telegram chat for notifications
+    telegram_username = Column(String(128), nullable=True)
 
 
 class PermissionCode(Base):
@@ -132,6 +134,29 @@ class PinResetCode(Base):
     code = Column(String(64), unique=True, nullable=False)
     expires_at = Column(DateTime, nullable=False)
     used_at = Column(DateTime, nullable=True)
+
+
+class TelegramLinkToken(Base):
+    """One-time token to link Telegram chat to app user. User opens t.me/Bot?start=TOKEN."""
+    __tablename__ = "telegram_link_tokens"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    token = Column(String(64), unique=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TradingAccount(Base):
+    """User's MT4/MT5 account linked via MetaAPI. Password sent to MetaAPI only, not stored."""
+    __tablename__ = "trading_accounts"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    metaapi_account_id = Column(String(64), nullable=False)
+    login = Column(String(32), nullable=False)
+    server = Column(String(128), nullable=False)
+    label = Column(String(128), nullable=True)
+    platform = Column(String(8), default="mt5")
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 # Create tables if they don't exist
@@ -331,6 +356,49 @@ else:
                         code VARCHAR(64) UNIQUE NOT NULL,
                         expires_at TIMESTAMP NOT NULL,
                         used_at TIMESTAMP
+                    )
+                """))
+                conn.commit()
+    except Exception:
+        pass
+    for col, typ in [("telegram_chat_id", "VARCHAR(32)"), ("telegram_username", "VARCHAR(128)")]:
+        try:
+            if not _column_exists("users", col):
+                with engine.connect() as conn:
+                    conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} {typ}"))
+                    conn.commit()
+        except Exception:
+            pass
+    try:
+        insp = inspect(engine)
+        if "telegram_link_tokens" not in insp.get_table_names():
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE telegram_link_tokens (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        token VARCHAR(64) UNIQUE NOT NULL,
+                        expires_at TIMESTAMP NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        insp2 = inspect(engine)
+        if "trading_accounts" not in insp2.get_table_names():
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE trading_accounts (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        metaapi_account_id VARCHAR(64) NOT NULL,
+                        login VARCHAR(32) NOT NULL,
+                        server VARCHAR(128) NOT NULL,
+                        label VARCHAR(128),
+                        platform VARCHAR(8) DEFAULT 'mt5',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """))
                 conn.commit()

@@ -452,6 +452,96 @@ def wallets_menu():
             print("Invalid choice")
 
 
+def telegram_connect():
+    """Request a Telegram link token and show the link to the user."""
+    if not _require_auth():
+        return
+    res = requests.get(f"{BASE_URL}/telegram/status", headers=auth_headers())
+    data, err = _parse_response(res)
+    if err:
+        print(f"❌ {err}")
+        return
+    if data and data.get("linked"):
+        print("✅ Telegram already linked.")
+        if data.get("telegram_username"):
+            print(f"   Username: @{data['telegram_username']}")
+        return
+    res = requests.post(f"{BASE_URL}/telegram/link-request", headers=auth_headers())
+    data, err = _parse_response(res)
+    if err:
+        print(f"❌ {err}")
+        return
+    if not data:
+        return
+    link = data.get("deep_link")
+    token = data.get("link_token")
+    if link:
+        print("Open this link in Telegram to link your account:")
+        print(f"  {link}")
+    else:
+        print("In Telegram, send this to the bot: /start " + (token or ""))
+    print("Link expires in 15 minutes.")
+
+
+def trading_accounts_menu():
+    if not _require_auth():
+        return
+    while True:
+        res = requests.get(f"{BASE_URL}/trading-accounts", headers=auth_headers())
+        data, err = _parse_response(res)
+        if err:
+            print(f"❌ {err}")
+            return
+        accounts = (data.get("trading_accounts") if isinstance(data, dict) else []) or []
+        print("\n--- Trading accounts ---")
+        if not accounts:
+            print("  No accounts. Add one below.")
+        else:
+            for a in accounts:
+                bal = a.get("balance")
+                curr = a.get("currency") or ""
+                bal_str = f"  {bal} {curr}".strip() if bal is not None else (a.get("error") or "—")
+                print(f"  {a['id']}: {a.get('login')} @ {a.get('server')}  ({a.get('label') or '-'})  Balance: {bal_str}")
+        print("\n1. Add account  2. Remove account  3. Back")
+        choice = input("Choose: ").strip()
+        if choice == "1":
+            login = input("Login (account number): ").strip()
+            password = getpass.getpass("Password: ")
+            server = input("Server (e.g. Broker-Demo): ").strip()
+            label = input("Label (optional): ").strip()
+            platform = input("Platform (mt4 or mt5) [mt5]: ").strip().lower() or "mt5"
+            if not login or not server:
+                print("Login and server required.")
+                continue
+            res = requests.post(f"{BASE_URL}/trading-accounts", headers=auth_headers(), json={
+                "login": login,
+                "password": password,
+                "server": server,
+                "label": label or None,
+                "platform": platform,
+            })
+            d, e = _parse_response(res)
+            if e:
+                print(f"❌ {e}")
+            else:
+                print("✅ Account added. Balance will show after MetaAPI connects.")
+        elif choice == "2":
+            aid = input("Account ID to remove: ").strip()
+            if not aid.isdigit():
+                print("Invalid ID")
+                continue
+            res = requests.delete(f"{BASE_URL}/trading-accounts/{aid}", headers=auth_headers())
+            d, e = _parse_response(res)
+            if e:
+                print(f"❌ {e}")
+            else:
+                print("✅ Account removed")
+        elif choice == "3":
+            return
+        else:
+            print("Invalid choice")
+
+
 def withdraw():
     if not _require_auth():
         return
@@ -688,9 +778,11 @@ def menu():
             print("5. My wallets")
             print("6. Stop Contract")
             print("7. Run")
-            print("8. Change PIN")
-            print("9. Log out")
-            print("10. Exit")
+            print("8. Connect Telegram")
+            print("9. Trading accounts")
+            print("10. Change PIN")
+            print("11. Log out")
+            print("12. Exit")
         else:
             print("1. Register")
             print("2. Login")
@@ -719,10 +811,14 @@ def menu():
             elif choice == "7":
                 run_contract()
             elif choice == "8":
-                change_pin()
+                telegram_connect()
             elif choice == "9":
-                logout()
+                trading_accounts_menu()
             elif choice == "10":
+                change_pin()
+            elif choice == "11":
+                logout()
+            elif choice == "12":
                 break
             else:
                 print("Invalid choice")
@@ -752,7 +848,9 @@ def _pause_if_exe():
     if getattr(sys, "frozen", False):
         input("\nPress Enter to close...")
 
-if __name__ == "__main__":
+
+def main():
+    """Entry point for the contract CLI (e.g. from pip-installed script)."""
     try:
         print("Checking server... (may take up to a minute if it's waking up)")
         _check_server()
@@ -767,3 +865,7 @@ if __name__ == "__main__":
         _pause_if_exe()
         sys.exit(1)
     _pause_if_exe()
+
+
+if __name__ == "__main__":
+    main()

@@ -14,3 +14,7 @@ token.txt
 build/
 dist/
 *.spec.log
+
+# Setuptools / package build
+*.egg-info/
+*.egg

@@ -3,6 +3,7 @@ import json
 import time
 import secrets
 import threading
+import requests as requests_lib
 from collections import defaultdict
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -17,8 +18,9 @@ import traceback
 
 DAILY_RATE = 0.02  # 2% per day
 
-from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode, PinResetCode
+from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode, PinResetCode, TelegramLinkToken, TradingAccount
 import cryptomus
+import metaapi
 
 SECRET_KEY = "secret123"
 
@@ -226,11 +228,15 @@ DURATION_OPTIONS_DAYS = [30, 60, 90]
 def contract_options(db: Session = Depends(get_db)):
     """List available contract plans, payment methods, and payment address (ERC20)."""
     plans = db.query(ContractPlan).order_by(ContractPlan.id).all()
+    telegram_available = bool((os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip())
+    metaapi_available = bool((os.environ.get("METAAPI_TOKEN") or "").strip())
     return {
         "plans": [{"id": p.id, "amount": p.amount, "label": p.label or f"${int(p.amount)}"} for p in plans],
         "payment_address_erc20": PAYMENT_ADDRESS_ERC20,
         "duration_options_days": DURATION_OPTIONS_DAYS,
         "cryptomus_available": cryptomus.is_configured(),
+        "telegram_available": telegram_available,
+        "metaapi_available": metaapi_available,
     }
 
 
@@ -560,6 +566,9 @@ def dashboard(user: User = Depends(get_current_user),
     ).first()
     active_run_contract_id = active_run.contract_id if active_run else None
 
+    telegram_linked = bool(getattr(user, "telegram_chat_id", None))
+    trading_accounts_count = db.query(TradingAccount).filter(TradingAccount.user_id == user.id).count()
+
     return {
         "contracts": len(contracts),
         "total_balance": round(total_balance, 2),
@@ -571,6 +580,8 @@ def dashboard(user: User = Depends(get_current_user),
         ],
         "active_run_contract_id": active_run_contract_id,
         "withdraw_window": _withdraw_window_info(),
+        "telegram_linked": telegram_linked,
+        "trading_accounts_count": trading_accounts_count,
     }
 
 
@@ -928,6 +939,205 @@ def _withdraw_window_info():
 def withdraw_window():
     """Return current withdraw window status and next open/close times (UTC). No auth required."""
     return _withdraw_window_info()
+
+
+# ================= TELEGRAM =================
+TELEGRAM_LINK_TOKEN_EXPIRY_SECONDS = 900  # 15 minutes
+
+
+def _telegram_bot_token():
+    return (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+
+
+def _telegram_bot_username():
+    return (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip()
+
+
+def send_telegram_message(db: Session, user_id: int, text: str) -> bool:
+    """Send a Telegram message to the user if they have linked Telegram. Returns True if sent."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not getattr(user, "telegram_chat_id", None):
+        return False
+    token = _telegram_bot_token()
+    if not token:
+        return False
+    try:
+        r = requests_lib.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": user.telegram_chat_id, "text": text},
+            timeout=10,
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+@app.post("/telegram/link-request")
+def telegram_link_request(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Create a one-time link token. User opens the deep link in Telegram and sends /start TOKEN to link."""
+    if not _telegram_bot_token():
+        raise HTTPException(status_code=503, detail="Telegram not configured")
+    link_token = secrets.token_urlsafe(24)
+    expires_at = datetime.utcnow() + timedelta(seconds=TELEGRAM_LINK_TOKEN_EXPIRY_SECONDS)
+    db.add(TelegramLinkToken(user_id=user.id, token=link_token, expires_at=expires_at))
+    db.commit()
+    bot_username = _telegram_bot_username()
+    deep_link = f"https://t.me/{bot_username}?start={link_token}" if bot_username else None
+    return {
+        "link_token": link_token,
+        "deep_link": deep_link,
+        "expires_in_seconds": TELEGRAM_LINK_TOKEN_EXPIRY_SECONDS,
+        "message": "Open the link in Telegram or send /start " + link_token + " to the bot.",
+    }
+
+
+@app.get("/telegram/status")
+def telegram_status(user: User = Depends(get_current_user)):
+    """Return whether the user has linked Telegram."""
+    linked = bool(getattr(user, "telegram_chat_id", None))
+    return {
+        "linked": linked,
+        "telegram_username": getattr(user, "telegram_username", None) or None,
+    }
+
+
+def _send_telegram_reply(chat_id, text: str) -> None:
+    """Send a text message to the given Telegram chat_id. No-op if chat_id missing or send fails."""
+    if chat_id is None:
+        return
+    token = _telegram_bot_token()
+    if not token:
+        return
+    try:
+        requests_lib.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+@app.post("/webhooks/telegram")
+async def webhook_telegram(request: Request, db: Session = Depends(get_db)):
+    """Telegram bot webhook: on /start TOKEN, link chat_id to user and reply.
+    Set webhook in Telegram: POST https://api.telegram.org/bot<TOKEN>/setWebhook?url=<BASE_URL>/webhooks/telegram"""
+    if not _telegram_bot_token():
+        raise HTTPException(status_code=503, detail="Telegram not configured")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    message = body.get("message") or {}
+    text = (message.get("text") or "").strip()
+    chat_id = message.get("chat", {}).get("id")
+    username = message.get("from", {}).get("username")
+    if not text.startswith("/start"):
+        return {"ok": True}
+    parts = text.split(maxsplit=1)
+    token = parts[1].strip() if len(parts) > 1 else None
+    if not token:
+        _send_telegram_reply(
+            chat_id,
+            "To link your account:\n1. Open the app (CLI or web)\n2. Log in and choose « Connect Telegram »\n3. Open the link you get, or send /start YOUR_TOKEN here",
+        )
+        return {"ok": True}
+    now = datetime.utcnow()
+    link_row = db.query(TelegramLinkToken).filter(
+        TelegramLinkToken.token == token,
+        TelegramLinkToken.expires_at > now,
+    ).first()
+    if not link_row:
+        _send_telegram_reply(chat_id, "Invalid or expired link. In the app, choose Connect Telegram again to get a new link.")
+        return {"ok": True}
+    user = db.query(User).filter(User.id == link_row.user_id).first()
+    if user:
+        user.telegram_chat_id = str(chat_id)
+        user.telegram_username = (username or "")[:128] if username else None
+        db.delete(link_row)
+        db.commit()
+    reply = "Linked. You'll receive notifications here." if user else "Invalid or expired link."
+    _send_telegram_reply(chat_id, reply)
+    return {"ok": True}
+
+
+# ================= TRADING ACCOUNTS (MetaAPI) =================
+@app.post("/trading-accounts")
+def trading_accounts_add(
+    data: dict,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Add a MetaTrader account (login, password, server). MetaAPI stores the connection; we store only id + login + server."""
+    if not metaapi.is_configured():
+        raise HTTPException(status_code=503, detail="Trading accounts not configured (METAAPI_TOKEN)")
+    login = (data.get("login") or "").strip()
+    password = data.get("password") or ""
+    server = (data.get("server") or "").strip()
+    label = (data.get("label") or "").strip() or login
+    platform = (data.get("platform") or "mt5").strip().lower()
+    if not login or not server:
+        raise HTTPException(status_code=400, detail="login and server required")
+    if not password:
+        raise HTTPException(status_code=400, detail="password required")
+    if platform not in ("mt4", "mt5"):
+        platform = "mt5"
+    account_id, err = metaapi.add_account(login, password, server, label, platform)
+    if err:
+        raise HTTPException(status_code=502, detail=f"MetaAPI: {err}")
+    row = TradingAccount(
+        user_id=user.id,
+        metaapi_account_id=account_id,
+        login=login,
+        server=server,
+        label=label[:128] if label else None,
+        platform=platform,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "metaapi_account_id": account_id, "login": login, "server": server, "label": row.label, "platform": platform}
+
+
+@app.get("/trading-accounts")
+def trading_accounts_list(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """List user's trading accounts with current balance from MetaAPI."""
+    accounts = db.query(TradingAccount).filter(TradingAccount.user_id == user.id).all()
+    result = []
+    for acc in accounts:
+        info, err = metaapi.get_account_information(acc.metaapi_account_id)
+        balance = equity = currency = None
+        if info:
+            balance = info.get("balance")
+            equity = info.get("equity")
+            currency = info.get("currency")
+        result.append({
+            "id": acc.id,
+            "login": acc.login,
+            "server": acc.server,
+            "label": acc.label,
+            "platform": acc.platform,
+            "balance": balance,
+            "equity": equity,
+            "currency": currency,
+            "error": err if not info else None,
+        })
+    return {"trading_accounts": result}
+
+
+@app.delete("/trading-accounts/{account_id}")
+def trading_accounts_delete(
+    account_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Remove a trading account from the user's list (does not remove from MetaAPI)."""
+    acc = db.query(TradingAccount).filter(TradingAccount.id == account_id, TradingAccount.user_id == user.id).first()
+    if not acc:
+        raise HTTPException(status_code=404, detail="Trading account not found")
+    db.delete(acc)
+    db.commit()
+    return {"ok": True}
 
 
 # ================= CRON (scheduled refunds) =================
