@@ -74,14 +74,23 @@ def create_withdraw(address: str, amount: str, request_id: str = None) -> tuple:
     }
     try:
         r = requests.post(url, headers=headers, data=body_str, timeout=30)
-        data = r.json() if r.text else {}
+        raw = (r.text or "").strip()
+        try:
+            data = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            snippet = (raw[:200] + "…") if len(raw) > 200 else raw
+            return None, (
+                f"Bybit returned non-JSON (status {r.status_code}). "
+                "Check API key IP whitelist (add Render IP from /outbound-ip). "
+                f"Response: {snippet or '(empty)'}"
+            )
         ret_code = data.get("retCode", -1)
         ret_msg = data.get("retMsg", "")
         if ret_code == 0:
             result = data.get("result") or {}
             return result.get("id"), None
         err = ret_msg or data.get("retExtInfo") or str(data)
-        if "whitelist" in err.lower() or "address" in err.lower() and "book" in err.lower():
+        if "whitelist" in str(err).lower() or ("address" in str(err).lower() and "book" in str(err).lower()):
             return None, "Address not in Bybit address book. Add it at https://www.bybit.com/user/assets/money-address"
         return None, err
     except requests.RequestException as e:
