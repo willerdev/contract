@@ -173,6 +173,20 @@ class AccountManagementPayment(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class RefundRequest(Base):
+    """User request to refund a bought contract. Status: pending | approved | rejected | paid."""
+    __tablename__ = "refund_requests"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    contract_id = Column(Integer, nullable=False)
+    reason = Column(String(1024), nullable=True)
+    wallet = Column(String(255), nullable=False)
+    status = Column(String(32), nullable=False, default="pending")
+    admin_notes = Column(String(1024), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # Create tables if they don't exist
 Base.metadata.create_all(engine)
 
@@ -446,6 +460,26 @@ else:
                         status VARCHAR(32) DEFAULT 'pending',
                         verified_at TIMESTAMP,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        insp4 = inspect(engine)
+        if "refund_requests" not in insp4.get_table_names():
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE refund_requests (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        contract_id INTEGER NOT NULL,
+                        reason VARCHAR(1024),
+                        wallet VARCHAR(255) NOT NULL,
+                        status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                        admin_notes VARCHAR(1024),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """))
                 conn.commit()

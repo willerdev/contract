@@ -18,7 +18,7 @@ import traceback
 
 DAILY_RATE = 0.02  # 2% per day
 
-from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode, PinResetCode, TelegramLinkToken, TradingAccount, AccountManagementPayment
+from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode, PinResetCode, TelegramLinkToken, TradingAccount, AccountManagementPayment, RefundRequest
 import cryptomus
 import bybit
 import metaapi
@@ -645,6 +645,81 @@ def list_contracts(user: User = Depends(get_current_user),
     }
 
 
+# ================= REFUND REQUESTS =================
+
+
+@app.post("/refund-request")
+def create_refund_request(
+    data: dict,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Submit a refund request for a bought contract. Status starts as 'pending'."""
+    contract_id = data.get("contract_id")
+    reason = (data.get("reason") or "").strip()
+    wallet = (data.get("wallet") or "").strip()
+    if not wallet:
+        raise HTTPException(status_code=400, detail="wallet is required")
+    if contract_id is None:
+        raise HTTPException(status_code=400, detail="contract_id is required")
+    try:
+        contract_id = int(contract_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="contract_id must be a number")
+    contract = db.query(Contract).filter(Contract.id == contract_id, Contract.user_id == user.id).first()
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    if (contract.status or "").lower() == "refunded":
+        raise HTTPException(status_code=400, detail="Contract is already refunded")
+    existing = db.query(RefundRequest).filter(
+        RefundRequest.user_id == user.id,
+        RefundRequest.contract_id == contract_id,
+        RefundRequest.status.in_(["pending", "approved", "paid"]),
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Refund request already exists for this contract (status: {existing.status})")
+    row = RefundRequest(
+        user_id=user.id,
+        contract_id=contract_id,
+        reason=reason[:1024] if reason else None,
+        wallet=wallet[:255],
+        status="pending",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {
+        "id": row.id,
+        "contract_id": contract_id,
+        "reason": row.reason,
+        "wallet": row.wallet,
+        "status": row.status,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "message": "Refund request submitted. You can check status in Refund menu.",
+    }
+
+
+@app.get("/refund-requests")
+def list_refund_requests(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """List current user's refund requests with status."""
+    rows = db.query(RefundRequest).filter(RefundRequest.user_id == user.id).order_by(RefundRequest.created_at.desc()).all()
+    return {
+        "refund_requests": [
+            {
+                "id": r.id,
+                "contract_id": r.contract_id,
+                "reason": r.reason,
+                "wallet": r.wallet,
+                "status": r.status,
+                "admin_notes": r.admin_notes,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
 # ================= RUN (22h, earnings every 10 min to withdrawables) =================
 import random as _random
 RUN_MAX_HOURS = 22
@@ -999,6 +1074,23 @@ def outbound_ip():
         return JSONResponse(status_code=502, content={"detail": str(e), "outbound_ip": None})
 
 
+@app.get("/bybit/balance")
+def bybit_balance(user: User = Depends(get_current_user)):
+    """Return Bybit Funding balance and actual withdrawable amount (avoids 131001). Auth required."""
+    if not bybit.is_configured():
+        return JSONResponse(status_code=503, content={"detail": "Bybit not configured", "balance": None})
+    balance_list, err = bybit.get_funding_balance()
+    if err:
+        return JSONResponse(status_code=502, content={"detail": err, "balance": None})
+    coin = (os.environ.get("BYBIT_WITHDRAW_COIN") or "USDT").strip().upper()
+    out = {"balance": balance_list, "coin": coin}
+    withdrawable, w_err = bybit.get_withdrawable_amount(coin)
+    if withdrawable and not w_err:
+        out["withdrawableAmount"] = withdrawable.get("withdrawableAmount") or "0"
+        out["limitAmountUsd"] = withdrawable.get("limitAmountUsd") or "0"
+    return out
+
+
 # ================= ACCOUNT MANAGEMENT ($50 for Telegram + Trading access) =================
 @app.get("/account-management/requirements")
 def account_management_requirements():
@@ -1264,6 +1356,12 @@ def trading_accounts_add(
     db.commit()
     db.refresh(row)
     return {"id": row.id, "metaapi_account_id": account_id, "login": login, "server": server, "label": row.label, "platform": platform}
+
+
+@app.get("/trading-accounts/available")
+def trading_accounts_available(user: User = Depends(get_current_user)):
+    """Return whether Trading accounts (MetaAPI) is configured so the CLI can hide the menu when not available."""
+    return {"available": metaapi.is_configured()}
 
 
 @app.get("/trading-accounts")

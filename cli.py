@@ -1,4 +1,6 @@
 import sys
+import time
+import threading
 import requests
 import getpass
 import json
@@ -16,6 +18,52 @@ TOKEN_FILE = "token.txt"
 
 # Timeout for server check. Render free tier can take 30–60s to wake from spin-down.
 SERVER_CHECK_TIMEOUT = int(os.environ.get("CLI_SERVER_TIMEOUT", "75"))
+
+# Cached: is Trading accounts (MetaAPI) available on the server? None = not yet checked; True/False = cached. Cleared on logout.
+_trading_available = None
+
+APP_LOGO = r"""
+   ____            _             _   
+  / ___|___  _ __ | |_ _ __ __ _| |_ 
+ | |   / _ \| '_ \| __| '__/ _` | __|
+ | |__| (_) | | | | |_| | | (_| | |_ 
+  \____\___/|_| |_|\__|_|  \__,_|\__|
+"""
+
+
+def clear_screen():
+    if os.name == "nt":
+        os.system("cls")
+    else:
+        os.system("clear")
+
+
+def print_header():
+    print(APP_LOGO)
+
+
+def _loading(callback, message="Loading"):
+    """Run callback and show a spinner until it returns."""
+    done = threading.Event()
+    result = []
+
+    def spinner():
+        chars = "|/-\\"
+        i = 0
+        while not done.is_set():
+            print("\r  " + message + " " + chars[i % 4], end="", flush=True)
+            i += 1
+            done.wait(0.12)
+        print("\r" + " " * (len(message) + 4) + "\r", end="", flush=True)
+
+    t = threading.Thread(target=spinner, daemon=True)
+    t.start()
+    try:
+        result.append(callback())
+    finally:
+        done.set()
+        time.sleep(0.05)
+    return result[0] if result else None
 
 
 def _check_server():
@@ -47,8 +95,10 @@ def load_token():
 
 
 def logout():
+    global _trading_available
     if os.path.exists(TOKEN_FILE):
         os.remove(TOKEN_FILE)
+    _trading_available = None
     print("✅ Logged out")
 
 
@@ -111,11 +161,11 @@ def register():
     pin = getpass.getpass("PIN (6 digits): ")
     pin = _normalize_pin(pin)
 
-    res = requests.post(f"{BASE_URL}/register", json={
+    res = _loading(lambda: requests.post(f"{BASE_URL}/register", json={
         "permission_code": permission_code,
         "email": email,
         "pin": pin
-    })
+    }), "Registering...")
 
     data, err = _parse_response(res)
     if err:
@@ -148,12 +198,12 @@ def change_pin():
     if new_pin != confirm:
         print("❌ New PIN and confirmation do not match.")
         return
-    res = requests.post(
+    res = _loading(lambda: requests.post(
         f"{BASE_URL}/change-pin",
         headers=auth_headers(),
         json={"current_pin": current, "new_pin": new_pin},
         timeout=30,
-    )
+    ), "Updating PIN...")
     data, err = _parse_response(res)
     if err:
         print(f"❌ {err}")
@@ -186,11 +236,11 @@ def reset_pin():
     if new_pin != confirm:
         print("❌ PIN and confirmation do not match.")
         return
-    res = requests.post(
+    res = _loading(lambda: requests.post(
         f"{BASE_URL}/reset-pin",
         json={"email": email, "reset_code": code, "new_pin": new_pin},
         timeout=30,
-    )
+    ), "Resetting PIN...")
     data, err = _parse_response(res)
     if err:
         print(f"❌ {err}")
@@ -206,10 +256,10 @@ def login():
     pin = getpass.getpass("PIN (6 digits): ")
     pin = _normalize_pin(pin)
 
-    res = requests.post(f"{BASE_URL}/login", json={
+    res = _loading(lambda: requests.post(f"{BASE_URL}/login", json={
         "email": email,
         "pin": pin
-    })
+    }), "Signing in...")
 
     data, err = _parse_response(res)
     if err:
@@ -249,7 +299,7 @@ def _require_auth():
 def buy():
     if not _require_auth():
         return
-    res = requests.get(f"{BASE_URL}/contracts/options")
+    res = _loading(lambda: requests.get(f"{BASE_URL}/contracts/options"), "Loading plans...")
     raw, err = _parse_response(res)
     if err:
         print(f"❌ {err or 'Could not load contract plans'}")
@@ -335,7 +385,7 @@ def buy():
         payload["payment_wallet"] = payment_wallet
         payload["payment_tx_id"] = transaction_id
 
-    res = requests.post(f"{BASE_URL}/buy", headers=auth_headers(), json=payload, timeout=30)
+    res = _loading(lambda: requests.post(f"{BASE_URL}/buy", headers=auth_headers(), json=payload, timeout=30), "Processing...")
     data, err = _parse_response(res)
     if res.status_code == 401:
         print("❌ Session expired or invalid. Please log out (option 7) and log in again.")
@@ -373,7 +423,7 @@ def _get_dashboard_data():
 def dashboard():
     if not _require_auth():
         return
-    data, err = _get_dashboard_data()
+    data, err = _loading(lambda: _get_dashboard_data(), "Loading...")
     if err:
         print(f"❌ {err}")
         return
@@ -383,7 +433,7 @@ def dashboard():
 def withdrawal_history():
     if not _require_auth():
         return
-    res = requests.get(f"{BASE_URL}/withdrawals/history", headers=auth_headers())
+    res = _loading(lambda: requests.get(f"{BASE_URL}/withdrawals/history", headers=auth_headers()), "Loading history...")
     data, err = _parse_response(res)
     if err:
         print(f"❌ {err}")
@@ -402,7 +452,7 @@ def wallets_menu():
     if not _require_auth():
         return
     while True:
-        res = requests.get(f"{BASE_URL}/wallets", headers=auth_headers())
+        res = _loading(lambda: requests.get(f"{BASE_URL}/wallets", headers=auth_headers()), "Loading wallets...")
         data, err = _parse_response(res)
         if err:
             print(f"❌ {err}")
@@ -422,11 +472,11 @@ def wallets_menu():
             wallet = input("Wallet address: ").strip()
             label = input("Label (optional): ").strip()
             is_first = len(wallets) == 0
-            res = requests.post(f"{BASE_URL}/wallets", headers=auth_headers(), json={
+            res = _loading(lambda: requests.post(f"{BASE_URL}/wallets", headers=auth_headers(), json={
                 "wallet": wallet,
                 "label": label or None,
                 "is_default": is_first
-            })
+            }), "Adding wallet...")
             d, e = _parse_response(res)
             if e:
                 print(f"❌ {e}")
@@ -437,7 +487,7 @@ def wallets_menu():
             if not wid.isdigit():
                 print("Invalid ID")
                 continue
-            res = requests.put(f"{BASE_URL}/wallets/default", headers=auth_headers(), json={"wallet_id": int(wid)})
+            res = _loading(lambda: requests.put(f"{BASE_URL}/wallets/default", headers=auth_headers(), json={"wallet_id": int(wid)}), "Updating default...")
             d, e = _parse_response(res)
             if e:
                 print(f"❌ {e}")
@@ -448,7 +498,7 @@ def wallets_menu():
             if not wid.isdigit():
                 print("Invalid ID")
                 continue
-            res = requests.delete(f"{BASE_URL}/wallets/{wid}", headers=auth_headers())
+            res = _loading(lambda: requests.delete(f"{BASE_URL}/wallets/{wid}", headers=auth_headers()), "Removing wallet...")
             d, e = _parse_response(res)
             if e:
                 print(f"❌ {e}")
@@ -494,7 +544,7 @@ def telegram_connect():
 def trading_accounts_menu():
     if not _require_auth():
         return
-    res = requests.get(f"{BASE_URL}/trading-accounts", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT)
+    res = _loading(lambda: requests.get(f"{BASE_URL}/trading-accounts", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT), "Loading trading accounts...")
     data, err = _parse_response(res)
     if err:
         if err == "telegram_trading_requirement" and data:
@@ -508,7 +558,7 @@ def trading_accounts_menu():
                 print("   (MetaAPI error: check login, password, server. Server name is case-sensitive.)")
         return
     while True:
-        res = requests.get(f"{BASE_URL}/trading-accounts", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT)
+        res = _loading(lambda: requests.get(f"{BASE_URL}/trading-accounts", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT), "Loading trading accounts...")
         data, err = _parse_response(res)
         if err:
             if err == "telegram_trading_requirement" and data:
@@ -537,13 +587,13 @@ def trading_accounts_menu():
             if not login or not server:
                 print("Login and server required.")
                 continue
-            res = requests.post(f"{BASE_URL}/trading-accounts", headers=auth_headers(), json={
+            res = _loading(lambda: requests.post(f"{BASE_URL}/trading-accounts", headers=auth_headers(), json={
                 "login": login,
                 "password": password,
                 "server": server,
                 "label": label or None,
                 "platform": platform,
-            })
+            }), "Adding account...")
             d, e = _parse_response(res)
             if e:
                 if e == "telegram_trading_requirement" and d:
@@ -559,7 +609,7 @@ def trading_accounts_menu():
             if not aid.isdigit():
                 print("Invalid ID")
                 continue
-            res = requests.delete(f"{BASE_URL}/trading-accounts/{aid}", headers=auth_headers())
+            res = _loading(lambda: requests.delete(f"{BASE_URL}/trading-accounts/{aid}", headers=auth_headers()), "Removing account...")
             d, e = _parse_response(res)
             if e:
                 print(f"❌ {e}")
@@ -613,16 +663,63 @@ def account_management_pay():
     print(data.get("message") or "Submitted. You will get access after verification.")
 
 
+def _fetch_bybit_balance():
+    """Fetch Bybit Funding balance and withdrawable amount. Returns (balance_list, coin, withdrawableAmount, limitAmountUsd) or (None, None, None, None)."""
+    res = requests.get(f"{BASE_URL}/bybit/balance", headers=auth_headers(), timeout=15)
+    if res.status_code != 200:
+        return None, None, None, None
+    data = res.json() if res.text else {}
+    return (
+        data.get("balance"),
+        data.get("coin"),
+        data.get("withdrawableAmount"),
+        data.get("limitAmountUsd"),
+    )
+
+
+def bybit_balance_menu():
+    """Display Bybit Funding balance and actual withdrawable amount (avoids 131001)."""
+    if not _require_auth():
+        return
+    balance_list, coin, withdrawable, limit_usd = _fetch_bybit_balance()
+    if balance_list is None and withdrawable is None:
+        print("Bybit balance unavailable (not configured or server error).")
+        return
+    c = coin or "USDT"
+    print(f"Bybit Funding balance ({c}):")
+    if balance_list:
+        for b in balance_list:
+            w = b.get("walletBalance", "0")
+            t = b.get("transferBalance", "0")
+            print(f"  {b.get('coin', c)}: wallet={w}, transferable={t}")
+    if withdrawable is not None:
+        print(f"  → Withdrawable (use this for withdrawals): {withdrawable} {c}")
+        if limit_usd and float(limit_usd) > 0:
+            print(f"  → Locked by deposit risk: {limit_usd} USD (wait for it to clear to withdraw more)")
+    if not balance_list and withdrawable is None:
+        print("  (no balance or zero)")
+
+
 def withdraw():
     if not _require_auth():
         return
-    dash = requests.get(f"{BASE_URL}/dashboard", headers=auth_headers())
+    dash = _loading(lambda: requests.get(f"{BASE_URL}/dashboard", headers=auth_headers()), "Loading...")
     dash_data, _ = _parse_response(dash)
     available = dash_data.get("available", 0) if isinstance(dash_data, dict) else 0
     print(f"Available for withdrawal (set by system): ${available}")
+    balance_list, coin, withdrawable, limit_usd = _fetch_bybit_balance()
+    if balance_list or withdrawable is not None:
+        c = coin or "USDT"
+        if withdrawable is not None:
+            print(f"Bybit Funding {c} withdrawable: {withdrawable} (max to withdraw)")
+            if limit_usd and float(limit_usd) > 0:
+                print(f"  (Locked by deposit risk: {limit_usd} USD)")
+        elif balance_list:
+            for b in balance_list:
+                print(f"Bybit Funding {b.get('coin', c)}: {b.get('walletBalance', '0')}")
     win = (dash_data.get("withdraw_window") if isinstance(dash_data, dict) else None) or {}
     print(f"Withdraw window: {win.get('message', '23:00–01:00 UTC')}")
-    res = requests.get(f"{BASE_URL}/wallets", headers=auth_headers())
+    res = _loading(lambda: requests.get(f"{BASE_URL}/wallets", headers=auth_headers()), "Loading wallets...")
     data, err = _parse_response(res)
     wallets = (data if not err and data else []) or []
     default_wallet = next((w["wallet"] for w in wallets if w.get("is_default")), None)
@@ -640,12 +737,12 @@ def withdraw():
         print("❌ No wallet. Add a default in My wallets or enter one here.")
         return
 
-    res = requests.post(
+    res = _loading(lambda: requests.post(
         f"{BASE_URL}/withdraw",
         headers=auth_headers(),
         json={"amount": amount, "wallet": wallet},
         timeout=30,
-    )
+    ), "Processing withdrawal...")
     data, err = _parse_response(res)
     if err:
         print(f"❌ {err}")
@@ -668,7 +765,7 @@ def run_contract():
     if not _require_auth():
         return
     # Use the same dashboard fetch as the Dashboard menu (option 2)
-    data, err = _get_dashboard_data()
+    data, err = _loading(lambda: _get_dashboard_data(), "Loading...")
     if err:
         print(f"❌ {err}")
         return
@@ -738,14 +835,12 @@ def run_contract():
 
     # Start run on server (earnings saved there; survives disconnect/power off)
     import random
-    import time
-    import threading
-    res = requests.post(
+    res = _loading(lambda: requests.post(
         f"{BASE_URL}/run/start",
         headers=auth_headers(),
         json={"contract_id": cid},
         timeout=30
-    )
+    ), "Starting run...")
     data, err = _parse_response(res)
     if err or res.status_code != 200:
         print(f"❌ {err or data.get('detail', res.text)}")
@@ -822,14 +917,14 @@ def stop():
     pin = getpass.getpass("Confirm PIN (6 digits): ")
     pin = _normalize_pin(pin)
 
-    res = requests.post(
+    res = _loading(lambda: requests.post(
         f"{BASE_URL}/stop",
         headers=auth_headers(),
         json={
             "contract_id": contract_id,
             "pin": pin
         }
-    )
+    ), "Stopping contract...")
     data, err = _parse_response(res)
     if err:
         print(f"❌ {err}")
@@ -837,11 +932,105 @@ def stop():
     print(data if isinstance(data, dict) else res.text)
 
 
-def menu():
+def refund_menu():
+    """Request a refund for a contract or view refund request status."""
+    if not _require_auth():
+        return
     while True:
+        print("\n--- Refund ---")
+        print("1. Request refund")
+        print("2. View refund status")
+        print("3. Back")
+        sub = input("Choose: ").strip()
+        if sub == "3":
+            return
+        if sub == "1":
+            res = _loading(lambda: requests.get(f"{BASE_URL}/contracts", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT), "Loading contracts...")
+            data, err = _parse_response(res)
+            if err:
+                print(f"❌ {err}")
+                continue
+            clist = (data.get("contract_list") if isinstance(data, dict) else []) or []
+            if not clist:
+                print("No contracts found. Buy a contract first.")
+                continue
+            print("\nYour contracts:")
+            for c in clist:
+                print(f"  ID {c.get('id')}: ${c.get('amount', 0)} — status: {c.get('status', '?')}")
+            cid_str = input("Contract ID to refund: ").strip()
+            try:
+                cid = int(cid_str)
+            except ValueError:
+                print("❌ Enter a number")
+                continue
+            reason = input("Reason for refund (optional): ").strip()
+            wallet = input("Wallet address to receive refund: ").strip()
+            if not wallet:
+                print("❌ Wallet is required")
+                continue
+            res = _loading(lambda: requests.post(
+                f"{BASE_URL}/refund-request",
+                headers=auth_headers(),
+                json={"contract_id": cid, "reason": reason or None, "wallet": wallet},
+                timeout=30,
+            ), "Submitting...")
+            data, err = _parse_response(res)
+            if err:
+                print(f"❌ {err}")
+                continue
+            print("✅ Refund request submitted.")
+            if isinstance(data, dict):
+                print(f"   Status: {data.get('status', 'pending')}")
+                if data.get("message"):
+                    print(f"   {data['message']}")
+            continue
+        if sub == "2":
+            res = _loading(lambda: requests.get(f"{BASE_URL}/refund-requests", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT), "Loading status...")
+            data, err = _parse_response(res)
+            if err:
+                print(f"❌ {err}")
+                continue
+            requests_list = (data.get("refund_requests") if isinstance(data, dict) else []) or []
+            if not requests_list:
+                print("No refund requests.")
+                continue
+            print("\n--- Refund requests ---")
+            for r in requests_list:
+                w = r.get("wallet") or ""
+                w_display = w[:24] + "..." if len(w) > 24 else w
+                print(f"  ID {r.get('id')}  Contract {r.get('contract_id')}  Wallet: {w_display}  Status: {r.get('status', '?')}")
+                print(f"    Created: {r.get('created_at', '')}  Updated: {r.get('updated_at', '')}")
+                if r.get("admin_notes"):
+                    print(f"    Admin: {r['admin_notes']}")
+            continue
+        print("Invalid choice")
+
+
+def _fetch_trading_available():
+    """Fetch whether Trading accounts (MetaAPI) is configured. Caches result until logout."""
+    global _trading_available
+    if _trading_available is not None:
+        return _trading_available
+    try:
+        res = _loading(lambda: requests.get(f"{BASE_URL}/trading-accounts/available", headers=auth_headers(), timeout=10), "Checking...")
+        if res.status_code == 200:
+            data = res.json() if res.text else {}
+            _trading_available = bool(data.get("available"))
+        else:
+            _trading_available = False
+    except Exception:
+        _trading_available = False
+    return _trading_available
+
+
+def menu():
+    global _trading_available
+    while True:
+        clear_screen()
+        print_header()
         logged_in = is_logged_in()
-        print("\n===== MENU =====")
         if logged_in:
+            _fetch_trading_available()
             print("1. Buy Contract")
             print("2. Dashboard")
             print("3. Withdraw")
@@ -849,12 +1038,16 @@ def menu():
             print("5. My wallets")
             print("6. Stop Contract")
             print("7. Run")
-            print("8. Connect Telegram")
-            print("9. Trading accounts")
-            print("10. Pay for Account Management ($50)")
-            print("11. Change PIN")
-            print("12. Log out")
-            print("13. Exit")
+            print("8. Refund")
+            if _trading_available:
+                print("9. Trading accounts")
+                print("10. Change PIN")
+                print("11. Log out")
+                print("12. Exit")
+            else:
+                print("9. Change PIN")
+                print("10. Log out")
+                print("11. Exit")
         else:
             print("1. Register")
             print("2. Login")
@@ -883,16 +1076,16 @@ def menu():
             elif choice == "7":
                 run_contract()
             elif choice == "8":
-                telegram_connect()
-            elif choice == "9":
+                refund_menu()
+            elif _trading_available and choice == "9":
                 trading_accounts_menu()
-            elif choice == "10":
-                account_management_pay()
-            elif choice == "11":
+            elif (_trading_available and choice == "10") or (not _trading_available and choice == "9"):
                 change_pin()
-            elif choice == "12":
+            elif (_trading_available and choice == "11") or (not _trading_available and choice == "10"):
                 logout()
-            elif choice == "13":
+            elif _trading_available and choice == "12":
+                break
+            elif not _trading_available and choice == "11":
                 break
             else:
                 print("Invalid choice")
@@ -926,8 +1119,7 @@ def _pause_if_exe():
 def main():
     """Entry point for the contract CLI (e.g. from pip-installed script)."""
     try:
-        print("Checking server... (may take up to a minute if it's waking up)")
-        _check_server()
+        _loading(lambda: _check_server(), "Checking server...")
         menu()
     except SystemExit:
         _pause_if_exe()
