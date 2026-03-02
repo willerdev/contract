@@ -31,7 +31,9 @@ If a user’s wallet is not whitelisted, the API will return an error and the wi
 
 ### Bybit IP whitelist
 
-Bybit can restrict API keys to specific IPs. The IP that matters is **your server's outbound IP** (the machine that runs `main2.py`), **not** your app users' IPs. There is no way to send a "universal" or custom IP in the API call—Bybit always sees the TCP source IP of the request.
+Per [Bybit V5 Integration Guidance](https://bybit-exchange.github.io/docs/v5/guide): **IP addresses in the US or Mainland China are restricted and get 403 Forbidden** from the API. Use a server or IP outside those regions.
+
+Bybit can also restrict API keys to specific IPs. The IP that matters is **your server's outbound IP** (the machine that runs `main2.py`), **not** your app users' IPs. There is no way to send a "universal" or custom IP in the API call—Bybit always sees the TCP source IP of the request.
 
 - **Find your server's outbound IP:** After deploy, open `https://your-app.onrender.com/outbound-ip` (or your backend URL + `/outbound-ip`). The response shows the IP Bybit sees. Whitelist that IP in Bybit: **Bybit → API Management → your key → IP restriction**.
 - **Render:** Outbound IPs may be **region-specific ranges** (see Dashboard → your service → **Outbound** tab). If Bybit accepts CIDR, whitelist that range; otherwise you may need a **static egress IP** (e.g. [QuotaGuard Static](https://render.com/docs/quotaguard) on Render) or a VPS with a fixed IP so a single IP can be whitelisted.
