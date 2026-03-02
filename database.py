@@ -50,6 +50,7 @@ class User(Base):
     telegram_chat_id = Column(String(32), nullable=True)  # linked Telegram chat for notifications
     telegram_username = Column(String(128), nullable=True)
     account_management_paid_at = Column(DateTime, nullable=True)  # when user paid $50 for Telegram + Trading access
+    custom_contract_amount = Column(Float, nullable=True)  # per-user extra contract amount (Extra menu)
 
 
 class PermissionCode(Base):
@@ -295,6 +296,13 @@ if _is_sqlite:
                 conn.commit()
     except Exception:
         pass
+    try:
+        if not _column_exists("users", "custom_contract_amount"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN custom_contract_amount REAL"))
+                conn.commit()
+    except Exception:
+        pass
 else:
     # PostgreSQL/Neon migrations - auto-add missing columns
     try:
@@ -443,6 +451,13 @@ else:
         if not _column_exists("users", "account_management_paid_at"):
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE users ADD COLUMN account_management_paid_at TIMESTAMP"))
+                conn.commit()
+    except Exception:
+        pass
+    try:
+        if not _column_exists("users", "custom_contract_amount"):
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN custom_contract_amount DOUBLE PRECISION"))
                 conn.commit()
     except Exception:
         pass

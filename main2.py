@@ -250,6 +250,36 @@ REQUIREMENT_MESSAGE = (
     "Pay to the ERC20 address below and submit your transaction ID; after verification you will get access."
 )
 
+# ================= EXTRA (custom contract amount per user) =================
+
+
+@app.get("/extra")
+def get_extra(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get current user's custom contract amount (Extra menu). None if not set."""
+    db.refresh(user)
+    amount = getattr(user, "custom_contract_amount", None)
+    return {"custom_contract_amount": float(amount) if amount is not None and float(amount) > 0 else None}
+
+
+@app.put("/extra")
+def set_extra(data: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Set or clear current user's custom contract amount. Body: { \"custom_contract_amount\": number } or null to clear."""
+    val = data.get("custom_contract_amount")
+    if val is None:
+        user.custom_contract_amount = None
+    else:
+        try:
+            amount = float(val)
+            if amount <= 0:
+                raise HTTPException(status_code=400, detail="Amount must be positive")
+            user.custom_contract_amount = amount
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="custom_contract_amount must be a positive number")
+    db.commit()
+    db.refresh(user)
+    return {"custom_contract_amount": float(user.custom_contract_amount) if user.custom_contract_amount else None}
+
+
 @app.get("/contracts/options")
 def contract_options(db: Session = Depends(get_db)):
     """List available contract plans, payment methods, and payment address (ERC20)."""
@@ -313,13 +343,25 @@ def _ensure_contract_payment_columns():
 def buy_contract(data: dict,
                  user: User = Depends(get_current_user),
                  db: Session = Depends(get_db)):
+    db.refresh(user)
     plan_id = data.get("contract_choice") or data.get("plan_id")
     if plan_id is None:
         raise HTTPException(status_code=400, detail="contract_choice or plan_id required")
-    plan = db.query(ContractPlan).filter(ContractPlan.id == plan_id).first()
-    if not plan:
-        raise HTTPException(status_code=400, detail="Invalid contract plan")
-    amount = plan.amount
+    try:
+        plan_id = int(plan_id)
+    except (TypeError, ValueError):
+        plan_id = None
+    if plan_id == 0:
+        # Extra: use user's custom contract amount
+        amount = getattr(user, "custom_contract_amount", None)
+        if amount is None or float(amount) <= 0:
+            raise HTTPException(status_code=400, detail="Set your custom amount in the Extra menu first")
+        amount = float(amount)
+    else:
+        plan = db.query(ContractPlan).filter(ContractPlan.id == plan_id).first()
+        if not plan:
+            raise HTTPException(status_code=400, detail="Invalid contract plan")
+        amount = plan.amount
 
     duration_days = data.get("duration_days")
     if duration_days not in (30, 60, 90):
@@ -1466,11 +1508,7 @@ def cron_process_refunds(request: Request, db: Session = Depends(get_db)):
 def withdraw(data: dict,
              user: User = Depends(get_current_user),
              db: Session = Depends(get_db)):
-    if not _is_withdraw_window():
-        raise HTTPException(
-            status_code=403,
-            detail="Withdrawals only allowed between 11:00 PM and 1:00 AM (UTC). Try again later.",
-        )
+    # Admin-paid withdrawals: store the request in DB and let an admin pay it manually later.
     amount = data.get("amount")
     wallet = (data.get("wallet") or "").strip()
     if amount is None:
@@ -1490,6 +1528,21 @@ def withdraw(data: dict,
         raise HTTPException(status_code=400, detail="amount must be a number")
     if amount <= 0:
         raise HTTPException(status_code=400, detail="amount must be positive")
+
+    # If an identical pending withdrawal already exists for this user, don't create a duplicate
+    existing = db.query(Withdrawal).filter(
+        Withdrawal.user_id == user.id,
+        Withdrawal.wallet == wallet,
+        Withdrawal.amount == amount,
+        Withdrawal.status == "pending",
+    ).first()
+    if existing:
+        return {
+            "status": "Withdrawal request already pending",
+            "message": "You already have a pending withdrawal request for this amount and wallet. Please wait for processing.",
+            "withdrawal_id": existing.id,
+        }
+
     db.refresh(user)
     available = getattr(user, "available_for_withdraw", None) or 0.0
     available = max(0.0, float(available))
@@ -1499,27 +1552,15 @@ def withdraw(data: dict,
             detail=f"Amount exceeds available for withdrawal ({round(available, 2)}). The system sets your withdrawable amount.",
         )
 
-    if bybit.is_configured():
-        user.available_for_withdraw = available - amount
-        withdrawal = Withdrawal(user_id=user.id, amount=amount, wallet=wallet, status="pending")
-        db.add(withdrawal)
-        db.flush()
-        bybit_id, err = bybit.create_withdraw(wallet, str(amount), request_id=str(withdrawal.id))
-        if err:
-            db.rollback()
-            raise HTTPException(status_code=502, detail=f"Bybit withdrawal failed: {err}")
-        withdrawal.status = "completed"
-        db.commit()
-        return {
-            "status": "Withdrawal submitted",
-            "message": "You will receive crypto to your wallet when the network confirms.",
-        }
-
     user.available_for_withdraw = available - amount
     withdrawal = Withdrawal(user_id=user.id, amount=amount, wallet=wallet, status="pending")
     db.add(withdrawal)
     db.commit()
-    return {"status": "Withdrawal request submitted"}
+    return {
+        "status": "Withdrawal request saved",
+        "message": "Your withdrawal request has been saved and will be paid manually by admin.",
+        "withdrawal_id": withdrawal.id,
+    }
 
 
 @app.post("/webhooks/cryptomus/payout")

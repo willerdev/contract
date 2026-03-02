@@ -306,12 +306,12 @@ def buy():
         return
     # API returns dict with plans, payment_address_erc20, duration_options_days, cryptomus_available; or legacy list
     if isinstance(raw, dict):
-        options = raw.get("plans") or raw.get("contract_list") or []
+        options = list(raw.get("plans") or raw.get("contract_list") or [])
         payment_address = raw.get("payment_address_erc20") or "0xD1D0B76F029Af8Bb5aEA1d0D77D061eDdeDfc6ff"
         duration_options = raw.get("duration_options_days") or [30, 60, 90]
         cryptomus_available = raw.get("cryptomus_available") is True
     else:
-        options = raw if isinstance(raw, list) else []
+        options = list(raw if isinstance(raw, list) else [])
         payment_address = "0xD1D0B76F029Af8Bb5aEA1d0D77D061eDdeDfc6ff"
         duration_options = [30, 60, 90]
         cryptomus_available = False
@@ -426,8 +426,53 @@ def dashboard():
     data, err = _loading(lambda: _get_dashboard_data(), "Loading...")
     if err:
         print(f"❌ {err}")
+        input("Press Enter to continue...")
         return
-    print(json.dumps(data, indent=2) if data is not None else "No data")
+    if not data or not isinstance(data, dict):
+        print("No data")
+        input("Press Enter to continue...")
+        return
+    print("\n--- Dashboard ---")
+    print(f"  Contracts: {data.get('contracts', 0)}")
+    print(f"  Total balance: ${data.get('total_balance', 0)}")
+    print(f"  Available for withdrawal: ${data.get('available', 0)}")
+    print(f"  Withdrawn: ${data.get('withdrawn', 0)}")
+    winfo = data.get("withdraw_window") or {}
+    if isinstance(winfo, dict) and winfo.get("message"):
+        print(f"  Withdraw window: {winfo['message']}")
+    clist = data.get("contract_list") or []
+    if clist:
+        print("  Contract list:")
+        active_id = data.get("active_run_contract_id")
+        for c in clist:
+            cid = c.get("id")
+            amt = c.get("amount", 0)
+            status = c.get("status", "?")
+            running = " (running)" if cid == active_id else ""
+            print(f"    ID {cid}: ${amt} — {status}{running}")
+    # Recent withdrawals (account and status)
+    try:
+        res_w = _loading(
+            lambda: requests.get(f"{BASE_URL}/withdrawals/history", headers=auth_headers()),
+            "Loading withdrawals...",
+        )
+        w_data, w_err = _parse_response(res_w)
+        if not w_err and w_data:
+            print("\n  Recent withdrawals:")
+            for w in w_data[:3]:
+                created = (w.get("created_at") or "")[:19] if w.get("created_at") else "-"
+                print(
+                    f"    #{w.get('id')}: {w.get('amount')} -> {w.get('wallet')}  "
+                    f"[{w.get('status')}] {created}"
+                )
+    except Exception:
+        pass
+    try:
+        print("\n" + json.dumps(data, indent=2, default=str))
+    except Exception:
+        pass
+    print()
+    input("Press Enter to continue...")
 
 
 def withdrawal_history():
@@ -437,15 +482,18 @@ def withdrawal_history():
     data, err = _parse_response(res)
     if err:
         print(f"❌ {err}")
+        input("Press Enter to continue...")
         return
     if not data:
         print("No withdrawals yet.")
+        input("Press Enter to continue...")
         return
     print("\n--- Withdrawal history ---")
     for w in data:
         created = (w.get("created_at") or "")[:19] if w.get("created_at") else "-"
         print(f"  {w.get('id')}: {w.get('amount')} -> {w.get('wallet')}  [{w.get('status')}]  {created}")
     print()
+    input("Press Enter to continue...")
 
 
 def wallets_menu():
@@ -746,6 +794,7 @@ def withdraw():
     data, err = _parse_response(res)
     if err:
         print(f"❌ {err}")
+        input("Press Enter to continue...")
         return
     if isinstance(data, dict):
         print(f"✅ {data.get('status', 'Done')}")
@@ -753,6 +802,8 @@ def withdraw():
             print(f"   {data['message']}")
     else:
         print(data if isinstance(data, dict) else res.text)
+    print()
+    input("Press Enter to continue...")
 
 
 def _random_hex(length=12):
@@ -1004,6 +1055,54 @@ def refund_menu():
                     print(f"    Admin: {r['admin_notes']}")
             continue
         print("Invalid choice")
+
+
+def extra_menu():
+    """Set or clear custom contract amount (Extra) for this user."""
+    if not _require_auth():
+        return
+    while True:
+        res = _loading(lambda: requests.get(f"{BASE_URL}/extra", headers=auth_headers(), timeout=10), "Loading...")
+        data, err = _parse_response(res)
+        if err:
+            print(f"❌ {err}")
+            input("Press Enter to continue...")
+            return
+        amount = (data.get("custom_contract_amount") if isinstance(data, dict) else None) if data else None
+        print("\n--- Extra (custom contract amount) ---")
+        if amount is not None and float(amount) > 0:
+            print(f"  Current: ${float(amount):,.2f}")
+        else:
+            print("  Current: not set")
+        print("1. Set custom amount  2. Clear  3. Back")
+        sub = input("Choose: ").strip()
+        if sub == "3":
+            return
+        if sub == "1":
+            inp = input("Amount (USD, e.g. 5000): ").strip()
+            try:
+                val = float(inp)
+                if val <= 0:
+                    print("❌ Amount must be positive")
+                    continue
+            except ValueError:
+                print("❌ Enter a number")
+                continue
+            res = _loading(lambda: requests.put(f"{BASE_URL}/extra", headers=auth_headers(), json={"custom_contract_amount": val}, timeout=10), "Saving...")
+            data, err = _parse_response(res)
+            if err:
+                print(f"❌ {err}")
+            else:
+                print("✅ Custom amount set. You can choose it as \"Extra\" when buying a contract.")
+        elif sub == "2":
+            res = _loading(lambda: requests.put(f"{BASE_URL}/extra", headers=auth_headers(), json={"custom_contract_amount": None}, timeout=10), "Saving...")
+            data, err = _parse_response(res)
+            if err:
+                print(f"❌ {err}")
+            else:
+                print("✅ Custom amount cleared.")
+        else:
+            print("Invalid choice")
 
 
 def _fetch_trading_available():
