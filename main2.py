@@ -1543,16 +1543,7 @@ def withdraw(data: dict,
             "withdrawal_id": existing.id,
         }
 
-    db.refresh(user)
-    available = getattr(user, "available_for_withdraw", None) or 0.0
-    available = max(0.0, float(available))
-    if amount > available:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Amount exceeds available for withdrawal ({round(available, 2)}). The system sets your withdrawable amount.",
-        )
-
-    user.available_for_withdraw = available - amount
+    # Just record the withdrawal request; balance/limits are handled by admin.
     withdrawal = Withdrawal(user_id=user.id, amount=amount, wallet=wallet, status="pending")
     db.add(withdrawal)
     db.commit()
