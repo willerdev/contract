@@ -16,7 +16,9 @@ from jose import jwt
 from datetime import datetime, timedelta, time as dtime
 import traceback
 
-DAILY_RATE = 0.02  # 2% per day
+# ROI per day: 5%–12%. Set ROI_DAILY_PERCENT (5–12) or default 8.
+_roi_pct = int(os.environ.get("ROI_DAILY_PERCENT", "8"))
+DAILY_RATE = min(12, max(5, _roi_pct)) / 100.0
 
 from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode, PinResetCode, TelegramLinkToken, TradingAccount, AccountManagementPayment, RefundRequest
 import cryptomus
@@ -588,8 +590,8 @@ def stop_contract(data: dict,
 # ================= DASHBOARD =================
 
 def _contract_balance(contract, now=None):
-    """Current value of a contract: amount + 2% per day since start. Only active contracts earn."""
-    if contract.status != "active" or not getattr(contract, "amount", None):
+    """Current value of a contract: amount + ROI per day since start. Active and running contracts earn."""
+    if (contract.status or "") not in ("active", "running") or not getattr(contract, "amount", None):
         return contract.amount or 0.0
     now = now or datetime.utcnow()
     start = contract.start_date or now
@@ -773,7 +775,7 @@ SECONDS_PER_DAY = 86400
 
 
 def _max_run_earnings_for_elapsed(contract_amount: float, elapsed_seconds: float) -> float:
-    """Max earnings for this run = 2% per day prorated by elapsed time. Never exceed daily cap."""
+    """Max earnings for this run = daily ROI prorated by elapsed time. Never exceed daily cap."""
     return round((contract_amount or 0) * DAILY_RATE * (elapsed_seconds / SECONDS_PER_DAY), 4)
 
 
@@ -788,7 +790,7 @@ def _run_random_earnings_chunk(contract_amount: float):
 def run_start(data: dict,
               user: User = Depends(get_current_user),
               db: Session = Depends(get_db)):
-    """Start a 22-hour run for a contract. Only one active run per user."""
+    """Start a 22-hour run for a contract. Only one active run per user. Contract must be active or stopped."""
     contract_id = data.get("contract_id")
     if contract_id is None:
         raise HTTPException(status_code=400, detail="contract_id required")
@@ -798,6 +800,12 @@ def run_start(data: dict,
     ).first()
     if not contract:
         raise HTTPException(status_code=404, detail="Contract not found")
+    status = (contract.status or "").lower()
+    if status not in ("active", "stopped"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Contract is not runnable (status: {contract.status}). Only active or stopped contracts can be run."
+        )
     active = db.query(RunSession).filter(
         RunSession.user_id == user.id,
         RunSession.ended_at == None
@@ -808,6 +816,7 @@ def run_start(data: dict,
             detail=f"Already running contract #{active.contract_id}. Stop it first or wait for it to finish."
         )
     now = datetime.utcnow()
+    contract.status = "running"
     session = RunSession(
         user_id=user.id,
         contract_id=contract_id,
@@ -856,6 +865,8 @@ def run_heartbeat(data: dict,
     # Auto-end if over 22 hours
     if elapsed >= RUN_MAX_HOURS * 3600:
         session.ended_at = now
+        if contract:
+            contract.status = "active"
         db.commit()
         return {"active": False, "ended": True, "earnings_added": session.earnings_added, "message": "Run completed (22 hours)."}
     cap = _max_run_earnings_for_elapsed(contract_amount, elapsed)
@@ -863,8 +874,8 @@ def run_heartbeat(data: dict,
     if current_earnings >= cap:
         session.ended_at = now
         db.commit()
-        return {"active": False, "ended": True, "earnings_added": current_earnings, "message": "Run stopped automatically: daily earnings cap (2%) reached."}
-    # Save earnings every 10 min: catch up any missed chunks (respect 2% daily cap)
+        return {"active": False, "ended": True, "earnings_added": current_earnings, "message": "Run stopped automatically: daily earnings cap reached."}
+    # Save earnings every 10 min: catch up any missed chunks (respect daily ROI cap)
     chunks_done = int(elapsed / RUN_EARNINGS_INTERVAL_SEC)
     existing = db.query(RunEarnings).filter(RunEarnings.run_id == session.id).count()
     db.refresh(user)
@@ -887,8 +898,10 @@ def run_heartbeat(data: dict,
         session.last_earnings_saved_at = now
     if ended_at_cap:
         session.ended_at = now
+        if contract:
+            contract.status = "active"
         db.commit()
-        return {"active": False, "ended": True, "earnings_added": session.earnings_added, "message": "Run stopped automatically: daily earnings cap (2%) reached."}
+        return {"active": False, "ended": True, "earnings_added": session.earnings_added, "message": "Run stopped automatically: daily earnings cap reached."}
     db.commit()
     db.refresh(session)
     return {
@@ -928,6 +941,8 @@ def run_stop(data: dict,
     contract_amount = (contract.amount or 2000) if contract else 2000
     now = datetime.utcnow()
     session.ended_at = now
+    if contract:
+        contract.status = "active"
     elapsed = (now - session.started_at).total_seconds()
     cap = _max_run_earnings_for_elapsed(contract_amount, elapsed)
     chunks_done = int(elapsed / RUN_EARNINGS_INTERVAL_SEC)
@@ -977,6 +992,12 @@ def run_status(user: User = Depends(get_current_user),
     elapsed = (now - session.started_at).total_seconds()
     if elapsed >= RUN_MAX_HOURS * 3600:
         session.ended_at = now
+        contract = db.query(Contract).filter(
+            Contract.id == session.contract_id,
+            Contract.user_id == user.id
+        ).first()
+        if contract:
+            contract.status = "active"
         db.commit()
         return {"active": False, "ended": True, "earnings_added": session.earnings_added}
     db.refresh(session)

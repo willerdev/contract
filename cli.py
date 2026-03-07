@@ -263,7 +263,11 @@ def login():
 
     data, err = _parse_response(res)
     if err:
-        print(f"❌ {err}")
+        if res.status_code == 403 and "banned" in (err or "").lower():
+            print("❌ Your account has been banned.")
+            print("   Contact support if you believe this is an error.")
+        else:
+            print(f"❌ {err}")
         return
     if "token" in (data or {}):
         save_token(data["token"])
@@ -318,7 +322,7 @@ def buy():
     if not options:
         print("❌ No contract plans available")
         return
-    print("\n--- Contract plans (2% per day) ---")
+    print("\n--- Contract plans (ROI 5–12% per day) ---")
     valid = []
     for i, p in enumerate(options):
         pid = p.get("id") if p.get("id") is not None else p.get("choice")
@@ -558,37 +562,6 @@ def wallets_menu():
             print("Invalid choice")
 
 
-def telegram_connect():
-    """Request a Telegram link token and show the link to the user."""
-    if not _require_auth():
-        return
-    res = requests.get(f"{BASE_URL}/telegram/status", headers=auth_headers())
-    data, err = _parse_response(res)
-    if err:
-        print(f"❌ {err}")
-        return
-    if data and data.get("linked"):
-        print("✅ Telegram already linked.")
-        if data.get("telegram_username"):
-            print(f"   Username: @{data['telegram_username']}")
-        return
-    res = requests.post(f"{BASE_URL}/telegram/link-request", headers=auth_headers())
-    data, err = _parse_response(res)
-    if err:
-        print(f"❌ {err}")
-        return
-    if not data:
-        return
-    link = data.get("deep_link")
-    token = data.get("link_token")
-    if link:
-        print("Open this link in Telegram to link your account:")
-        print(f"  {link}")
-    else:
-        print("In Telegram, send this to the bot: /start " + (token or ""))
-    print("Link expires in 15 minutes.")
-
-
 def trading_accounts_menu():
     if not _require_auth():
         return
@@ -669,48 +642,6 @@ def trading_accounts_menu():
             print("Invalid choice")
 
 
-def account_management_pay():
-    """Show Account Management fee and payment address; submit user's ERC20 payment for verification."""
-    if not _require_auth():
-        return
-    res = requests.get(f"{BASE_URL}/dashboard", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT)
-    dash_data, _ = _parse_response(res)
-    if isinstance(dash_data, dict) and dash_data.get("account_management_paid_at"):
-        print("✅ You already have Account Management access.")
-        return
-    res = requests.get(f"{BASE_URL}/account-management/requirements", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT)
-    data, err = _parse_response(res)
-    if err:
-        print(f"❌ {err}")
-        if res.status_code == 404:
-            print("   (Server may need an update. Deploy the latest code.)")
-        elif res.status_code == 503:
-            print("   (Run neon_telegram_trading_migration.sql on Neon, then redeploy.)")
-        return
-    print("\n--- Account Management ($50 one-time) ---")
-    print(data.get("summary") or data.get("message", ""))
-    print(f"\n  Pay ${data.get('fee_amount', 50)} {data.get('fee_currency', 'USDT')} (ERC20) to:")
-    print(f"  {data.get('payment_address_erc20', '')}")
-    print("\n  After payment, enter the wallet you used and the transaction ID below.")
-    print("  Access will be granted after verification.\n")
-    wallet = input("Wallet address you used to pay: ").strip()
-    tx_id = input("Transaction ID: ").strip()
-    if not wallet or not tx_id:
-        print("❌ Wallet and transaction ID required.")
-        return
-    res = requests.post(f"{BASE_URL}/account-management/submit-payment", headers=auth_headers(), json={
-        "payment_wallet": wallet,
-        "payment_tx_id": tx_id,
-    }, timeout=SERVER_CHECK_TIMEOUT)
-    data, err = _parse_response(res)
-    if err:
-        print(f"❌ {err}")
-        if res.status_code == 503:
-            print("   Run neon_telegram_trading_migration.sql on your Neon database, then redeploy the server.")
-        return
-    print(data.get("message") or "Submitted. You will get access after verification.")
-
-
 def _fetch_bybit_balance():
     """Fetch Bybit Funding balance and withdrawable amount. Returns (balance_list, coin, withdrawableAmount, limitAmountUsd) or (None, None, None, None)."""
     res = requests.get(f"{BASE_URL}/bybit/balance", headers=auth_headers(), timeout=15)
@@ -723,29 +654,6 @@ def _fetch_bybit_balance():
         data.get("withdrawableAmount"),
         data.get("limitAmountUsd"),
     )
-
-
-def bybit_balance_menu():
-    """Display Bybit Funding balance and actual withdrawable amount (avoids 131001)."""
-    if not _require_auth():
-        return
-    balance_list, coin, withdrawable, limit_usd = _fetch_bybit_balance()
-    if balance_list is None and withdrawable is None:
-        print("Bybit balance unavailable (not configured or server error).")
-        return
-    c = coin or "USDT"
-    print(f"Bybit Funding balance ({c}):")
-    if balance_list:
-        for b in balance_list:
-            w = b.get("walletBalance", "0")
-            t = b.get("transferBalance", "0")
-            print(f"  {b.get('coin', c)}: wallet={w}, transferable={t}")
-    if withdrawable is not None:
-        print(f"  → Withdrawable (use this for withdrawals): {withdrawable} {c}")
-        if limit_usd and float(limit_usd) > 0:
-            print(f"  → Locked by deposit risk: {limit_usd} USD (wait for it to clear to withdraw more)")
-    if not balance_list and withdrawable is None:
-        print("  (no balance or zero)")
 
 
 def withdraw():
@@ -1057,52 +965,31 @@ def refund_menu():
         print("Invalid choice")
 
 
-def extra_menu():
-    """Set or clear custom contract amount (Extra) for this user."""
-    if not _require_auth():
-        return
-    while True:
-        res = _loading(lambda: requests.get(f"{BASE_URL}/extra", headers=auth_headers(), timeout=10), "Loading...")
-        data, err = _parse_response(res)
-        if err:
-            print(f"❌ {err}")
-            input("Press Enter to continue...")
-            return
-        amount = (data.get("custom_contract_amount") if isinstance(data, dict) else None) if data else None
-        print("\n--- Extra (custom contract amount) ---")
-        if amount is not None and float(amount) > 0:
-            print(f"  Current: ${float(amount):,.2f}")
-        else:
-            print("  Current: not set")
-        print("1. Set custom amount  2. Clear  3. Back")
-        sub = input("Choose: ").strip()
-        if sub == "3":
-            return
-        if sub == "1":
-            inp = input("Amount (USD, e.g. 5000): ").strip()
-            try:
-                val = float(inp)
-                if val <= 0:
-                    print("❌ Amount must be positive")
-                    continue
-            except ValueError:
-                print("❌ Enter a number")
-                continue
-            res = _loading(lambda: requests.put(f"{BASE_URL}/extra", headers=auth_headers(), json={"custom_contract_amount": val}, timeout=10), "Saving...")
-            data, err = _parse_response(res)
-            if err:
-                print(f"❌ {err}")
-            else:
-                print("✅ Custom amount set. You can choose it as \"Extra\" when buying a contract.")
-        elif sub == "2":
-            res = _loading(lambda: requests.put(f"{BASE_URL}/extra", headers=auth_headers(), json={"custom_contract_amount": None}, timeout=10), "Saving...")
-            data, err = _parse_response(res)
-            if err:
-                print(f"❌ {err}")
-            else:
-                print("✅ Custom amount cleared.")
-        else:
-            print("Invalid choice")
+def terms_and_conditions():
+    """Display Terms and Conditions."""
+    print("\n--- Terms and Conditions ---")
+    print("""
+  1. By using this service you agree to these terms.
+
+  2. Access is by invitation only. A valid permission code is required to sign up.
+     Unauthorized registration is not permitted.
+
+  3. This is not a commercial product. Distribution of this product without approved
+     permission is prohibited. Unauthorized distribution may lead to users losing
+     their funds.
+
+  4. Refunds requested before the contract end date may result in your account being
+     banned. Approved refunds are subject to penalty fees, which will be deducted
+     from the refund amount.
+
+  5. Contracts are subject to verification and system rules. Withdrawals are
+     processed according to the stated schedule.
+
+  6. We reserve the right to update these terms; continued use constitutes acceptance.
+
+  7. Contact support for questions regarding your account or contracts.
+""")
+    input("Press Enter to continue...")
 
 
 def _fetch_trading_available():
@@ -1142,20 +1029,19 @@ def menu():
                 print("9. Trading accounts")
                 print("10. Change PIN")
                 print("11. Log out")
-                print("12. Exit")
+                print("12. Terms and Conditions")
+                print("13. Exit")
             else:
                 print("9. Change PIN")
                 print("10. Log out")
-                print("11. Exit")
+                print("11. Terms and Conditions")
+                print("12. Exit")
         else:
             print("1. Register")
             print("2. Login")
             print("3. Forgot PIN")
-            print("4. Buy Contract")
-            print("5. Dashboard")
-            print("6. Withdraw")
-            print("7. Stop Contract")
-            print("8. Exit")
+            print("4. Terms and Conditions")
+            print("5. Exit")
 
         choice = input("Choose: ").strip()
 
@@ -1183,9 +1069,11 @@ def menu():
             elif (_trading_available and choice == "11") or (not _trading_available and choice == "10"):
                 logout()
             elif _trading_available and choice == "12":
+                terms_and_conditions()
+            elif (_trading_available and choice == "13") or (not _trading_available and choice == "12"):
                 break
             elif not _trading_available and choice == "11":
-                break
+                terms_and_conditions()
             else:
                 print("Invalid choice")
         else:
@@ -1196,14 +1084,8 @@ def menu():
             elif choice == "3":
                 reset_pin()
             elif choice == "4":
-                buy()
+                terms_and_conditions()
             elif choice == "5":
-                dashboard()
-            elif choice == "6":
-                withdraw()
-            elif choice == "7":
-                stop()
-            elif choice == "8":
                 break
             else:
                 print("Invalid choice")
