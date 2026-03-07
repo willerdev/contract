@@ -225,6 +225,9 @@ def change_pin(request: Request, data: dict,
 
 # ================= BUY CONTRACT =================
 PAYMENT_ADDRESS_ERC20 = "0xD1D0B76F029Af8Bb5aEA1d0D77D061eDdeDfc6ff"
+PAYMENT_ADDRESS_TRC20 = "TSqneLhS4PDycXg8a9hmFVw8TmxubrwAGL"
+PAYMENT_ADDRESS_SOLANA = "7KZKhfAK2Hviuu8QuAyg1rceeSAr2U6cbVgoo9d1Kxmu"
+PAYMENT_ADDRESS_BTC = "bc1qqk7deeakj7c23q7vpzh7lsfdatkqn0h8pfw3q0"
 DURATION_OPTIONS_DAYS = [30, 60, 90]
 ACCOUNT_MANAGEMENT_FEE = 50.0
 ACCOUNT_MANAGEMENT_FEE_CURRENCY = "USDT"
@@ -291,6 +294,9 @@ def contract_options(db: Session = Depends(get_db)):
     return {
         "plans": [{"id": p.id, "amount": p.amount, "label": p.label or f"${int(p.amount)}"} for p in plans],
         "payment_address_erc20": PAYMENT_ADDRESS_ERC20,
+        "payment_address_trc20": PAYMENT_ADDRESS_TRC20,
+        "payment_address_solana": PAYMENT_ADDRESS_SOLANA,
+        "payment_address_btc": PAYMENT_ADDRESS_BTC,
         "duration_options_days": DURATION_OPTIONS_DAYS,
         "cryptomus_available": cryptomus.is_configured(),
         "telegram_available": telegram_available,

@@ -6,8 +6,10 @@ if exist ContractCLI.exe (
     ContractCLI.exe
 ) else if exist dist\ContractCLI.exe (
     dist\ContractCLI.exe
+) else if exist dist2\ContractCLI.exe (
+    dist2\ContractCLI.exe
 ) else (
-    echo ContractCLI.exe not found. Run build_exe.bat first.
+    echo ContractCLI.exe not found. Run build_exe.bat or python build.py first.
 )
 
 pause

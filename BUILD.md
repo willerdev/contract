@@ -1,11 +1,11 @@
-# Building the Contract CLI .exe
+# Building the Contract CLI .exe for distribution
 
-Users get a single executable with no Python install and no source code.
+Single executable so users can run the app without installing Python or source code.
 
 ## Important
 
-- **Build on Windows** to get **ContractCLI.exe** that runs on Windows. Building on Mac produces a Mac binary (not a Windows .exe).
-- If the exe doesn’t run, open **Command Prompt**, `cd` to the folder with the exe, run `ContractCLI.exe` and check the error message.
+- **Build on Windows** to get **ContractCLI.exe** for Windows users. Building on Mac/Linux produces a Mac/Linux binary (not a Windows .exe).
+- Users only need the exe (and optionally `run_cli.bat`). No Python or code required.
 
 ## One-time setup
 
@@ -13,9 +13,39 @@ Users get a single executable with no Python install and no source code.
 pip install -r requirements-build.txt
 ```
 
-## Build (Windows)
+(`requirements-build.txt` contains `pyinstaller>=6.0`.)
 
-Double-click **build_exe.bat** or run:
+## Build methods
+
+### Option 1: Python script (any OS)
+
+```bash
+python build.py
+```
+
+Output: **dist/ContractCLI.exe** (Windows) or **dist/ContractCLI** (Mac/Linux).
+
+Custom output folders:
+
+```bash
+python build.py --dist dist2 --workpath build_win
+```
+
+### Option 2: Batch file (Windows)
+
+**build_exe.bat** – installs deps and builds into `dist/`:
+
+```cmd
+build_exe.bat
+```
+
+**build_win_exe.bat** – builds into `dist2/` (no auto pip install):
+
+```cmd
+build_win_exe.bat
+```
+
+### Option 3: PyInstaller directly
 
 ```bash
 pyinstaller --noconfirm cli.spec
@@ -25,22 +55,29 @@ Output: **dist/ContractCLI.exe**
 
 ## If the exe doesn’t run
 
-1. **Run from CMD** to see the real error:
+1. **Run from Command Prompt** to see errors:
    ```
    cd path\to\dist
    ContractCLI.exe
    ```
-2. **Antivirus** may block new .exe files; add an exception for `dist\` or the exe.
-3. **Right‑click → Run as administrator** once if Windows blocks it.
-4. Rebuild with **UPX off** (already set in `cli.spec`: `upx=False`).
+2. **Antivirus** may block new .exe files; add an exception for the exe or the folder.
+3. **Run as administrator** once if Windows blocks it.
+4. UPX is already disabled in `cli.spec` (`upx=False`) to reduce false positives.
 
 ## Distributing to users
 
-1. Give users **dist/ContractCLI.exe** (and optionally **run_cli.bat** in the same folder).
-2. They double-click the .exe or the .bat. No Python or source code required.
-3. Optional: they can set `BASE_URL` via environment variable or a `.env` file next to the exe if you need a different server.
+1. **Give users:**
+   - **ContractCLI.exe** (from `dist/` or `dist2/`)
+   - Optionally **run_cli.bat** in the same folder (so they can double‑click to run).
 
-## Notes
+2. **Optional:** Zip the folder (e.g. `ContractCLI.zip` with the exe and run_cli.bat) for download.
 
-- Built exe reads `BASE_URL` from environment or `.env` in the same folder (if present).
-- Token is saved as `token.txt` in the current working directory when they run the exe.
+3. **No Python or source** needed on their machine.
+
+4. **Server URL:** The exe uses `BASE_URL` from the environment or a `.env` file in the same folder. Default is your Render URL. Users can override with their own `.env` if you distribute a different server.
+
+5. **Token:** Login saves `token.txt` in the current directory when they run the exe.
+
+## Spec file
+
+**cli.spec** – PyInstaller spec for a single-file console exe. Entry point: `cli.py`. Hidden imports include `requests`, `dotenv`, etc. Edit the spec to add data files or change the exe name if needed.

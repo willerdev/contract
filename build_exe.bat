@@ -1,6 +1,6 @@
 @echo off
-REM Build Contract CLI into a single .exe (no Python or source needed for users)
-REM Run this from the project folder after: pip install -r requirements-build.txt
+REM Build Contract CLI into a single .exe for distribution.
+REM Run from project folder. Installs PyInstaller then builds.
 
 cd /d "%~dp0"
 
@@ -19,6 +19,6 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo Done. Executable: dist\ContractCLI.exe
-echo Give users: dist\ContractCLI.exe and run_cli.bat (optional)
+echo Distribute to users: dist\ContractCLI.exe and run_cli.bat (optional)
 echo.
 pause

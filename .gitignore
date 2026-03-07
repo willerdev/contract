@@ -12,9 +12,14 @@ token.txt
 
 # PyInstaller
 build/
+build_win/
 dist/
+dist2/
 *.spec.log
 
 # Setuptools / package build
 *.egg-info/
 *.egg
+
+# OS
+.DS_Store
