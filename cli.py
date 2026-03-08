@@ -16,6 +16,25 @@ BASE_URL = os.environ.get("BASE_URL", "https://contract-31az.onrender.com")
 TOKEN_FILE = "token.txt"
 
 
+def _read_cli_version():
+    """Read CLI version from VERSION file (next to script or from PyInstaller bundle)."""
+    try:
+        if getattr(sys, "frozen", False):
+            base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+        else:
+            base = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base, "VERSION")
+        if os.path.isfile(path):
+            with open(path, "r") as f:
+                return f.read().strip() or "0.0.0"
+    except Exception:
+        pass
+    return "0.0.0"
+
+
+CLI_VERSION = _read_cli_version()
+
+
 # Timeout for server check. Render free tier can take 30–60s to wake from spin-down.
 SERVER_CHECK_TIMEOUT = int(os.environ.get("CLI_SERVER_TIMEOUT", "75"))
 
@@ -40,6 +59,7 @@ def clear_screen():
 
 def print_header():
     print(APP_LOGO)
+    print(f"  Contract CLI v{CLI_VERSION}")
 
 
 def _loading(callback, message="Loading"):
@@ -147,9 +167,48 @@ def _find_contract_list_in_data(data):
     return []
 
 
-def _normalize_pin(pin: str) -> str:
-    """Keep only digits; server will reject if not exactly 6."""
-    return "".join(c for c in (pin or "").strip() if c.isdigit())
+def _parse_version(s: str):
+    """Convert '1.2.3' to (1, 2, 3) for comparison. Non-numeric parts become 0."""
+    parts = (s or "0").strip().split(".")
+    out = []
+    for p in parts[:4]:
+        try:
+            out.append(int(p))
+        except ValueError:
+            out.append(0)
+    return tuple(out) + (0,) * (3 - len(out))
+
+
+def _version_less(local: str, remote: str) -> bool:
+    """True if local is strictly older than remote."""
+    return _parse_version(local) < _parse_version(remote)
+
+
+def check_for_updates():
+    """Fetch server's latest CLI version and prompt user to download if newer."""
+    try:
+        res = requests.get(f"{BASE_URL}/version", timeout=10)
+        if res.status_code != 200:
+            print("Could not check for updates (server error).")
+            return
+        data = res.json()
+        remote_version = (data.get("cli_version") or "").strip()
+        download_url = (data.get("download_url") or "").strip()
+        if not remote_version:
+            print("Could not check for updates (no version from server).")
+            return
+        if _version_less(CLI_VERSION, remote_version):
+            print(f"\n  New version available: v{remote_version} (you have v{CLI_VERSION})")
+            if download_url:
+                print(f"  Download: {download_url}")
+            else:
+                print("  Check the project page for the latest download.")
+        else:
+            print(f"\n  You have the latest version (v{CLI_VERSION}).")
+    except requests.exceptions.RequestException as e:
+        print(f"Could not check for updates: {e}")
+    except Exception as e:
+        print(f"Could not check for updates: {e}")
 
 
 def register():
@@ -1007,6 +1066,7 @@ def menu():
         clear_screen()
         print_header()
         logged_in = is_logged_in()
+        print("0. Check for updates")
         if logged_in:
             _fetch_trading_available()
             print("1. Buy Contract")
@@ -1037,6 +1097,10 @@ def menu():
 
         choice = input("Choose: ").strip()
 
+        if choice == "0":
+            check_for_updates()
+            input("Press Enter to continue...")
+            continue
         if logged_in:
             if choice == "1":
                 buy()

@@ -80,4 +80,33 @@ Output: **dist/ContractCLI.exe**
 
 ## Spec file
 
-**cli.spec** – PyInstaller spec for a single-file console exe. Entry point: `cli.py`. Hidden imports include `requests`, `dotenv`, etc. Edit the spec to add data files or change the exe name if needed.
+**cli.spec** – PyInstaller spec for a single-file console exe. Entry point: `cli.py`. Bundles **VERSION** for in-app version and update checks. Hidden imports include `requests`, `dotenv`, etc.
+
+---
+
+## Releasing a new version (so users get updates themselves)
+
+The CLI is **served from your Render app** at `/download/ContractCLI.exe`, so users never see the GitHub repo URL.
+
+1. **Bump version**  
+   Edit **VERSION** in the project root (e.g. `1.0.1`). This is shown in the CLI and used for update checks.
+
+2. **Build the executable**  
+   On Windows: `python build.py` (or `build_exe.bat`). Output: `dist/ContractCLI.exe`.
+
+3. **Deploy the exe to Render**  
+   - Copy the built exe into the app:  
+     `copy dist\ContractCLI.exe static\ContractCLI.exe` (Windows) or  
+     `cp dist/ContractCLI.exe static/ContractCLI.exe` (Mac/Linux).  
+   - Commit and push (or deploy). The backend serves `static/ContractCLI.exe` at **GET /download/ContractCLI.exe**.
+
+4. **Set backend env (Render)**  
+   - `CLI_LATEST_VERSION` = same as in **VERSION** (e.g. `1.0.1`).  
+   - Leave `CLI_DOWNLOAD_URL` unset so it defaults to your app URL (uses `RENDER_EXTERNAL_URL` or `PUBLIC_URL`):  
+     `https://<your-app>.onrender.com/download/ContractCLI.exe`.  
+   Redeploy after changing env.
+
+5. **Tell users**  
+   Users run **ContractCLI.exe**, choose **0. Check for updates**. If their version is older, they get a link to **your Render app** to download the new exe (no GitHub link).
+
+**One-time setup for users:** Give them the first **ContractCLI.exe** once. After that, they use “Check for updates” and download new builds from your Render URL only.

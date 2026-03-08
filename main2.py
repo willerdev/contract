@@ -6,7 +6,7 @@ import threading
 import requests as requests_lib
 from collections import defaultdict
 from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -47,6 +47,33 @@ def health(db: Session = Depends(get_db)):
     except Exception:
         return JSONResponse(status_code=503, content={"status": "unhealthy", "database": "error"})
     return {"status": "ok", "database": "ok"}
+
+
+# CLI update check: version and download URL (served from this app to avoid exposing repo)
+_APP_PUBLIC_URL = (os.environ.get("PUBLIC_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "https://contract-31az.onrender.com").strip().rstrip("/")
+CLI_LATEST_VERSION = (os.environ.get("CLI_LATEST_VERSION") or "1.0.0").strip()
+CLI_DOWNLOAD_URL = (os.environ.get("CLI_DOWNLOAD_URL") or f"{_APP_PUBLIC_URL}/download/ContractCLI.exe").strip()
+
+# Path to static CLI binary (deploy with ContractCLI.exe in static/ when releasing)
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+_CLI_EXE_PATH = os.path.join(_STATIC_DIR, "ContractCLI.exe")
+
+
+@app.get("/download/ContractCLI.exe", response_class=FileResponse)
+def download_cli():
+    """Serve the CLI executable from this app so the download URL is Render, not the repo."""
+    if not os.path.isfile(_CLI_EXE_PATH):
+        raise HTTPException(status_code=404, detail="CLI binary not available")
+    return FileResponse(_CLI_EXE_PATH, filename="ContractCLI.exe", media_type="application/octet-stream")
+
+
+@app.get("/version")
+def version():
+    """Public endpoint for CLI to check for updates. Returns latest CLI version and download URL."""
+    return {
+        "cli_version": CLI_LATEST_VERSION,
+        "download_url": CLI_DOWNLOAD_URL,
+    }
 
 
 @app.exception_handler(Exception)

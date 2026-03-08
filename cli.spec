@@ -7,7 +7,7 @@ a = Analysis(
     ['cli.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('VERSION', '.')],
     hiddenimports=['requests', 'urllib3', 'certifi', 'charset_normalizer', 'idna', 'dotenv'],
     hookspath=[],
     hooksconfig={},
