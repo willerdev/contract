@@ -1060,6 +1060,33 @@ def _fetch_trading_available():
     return _trading_available
 
 
+def settings_menu():
+    """Submenu: Stop Contract, Run, Change PIN, Terms and Conditions."""
+    while True:
+        clear_screen()
+        print_header()
+        print("--- Settings ---")
+        print("1. Stop Contract")
+        print("2. Run")
+        print("3. Change PIN")
+        print("4. Terms and Conditions")
+        print("5. Back")
+        choice = input("Choose: ").strip()
+        if choice == "1":
+            stop()
+        elif choice == "2":
+            run_contract()
+        elif choice == "3":
+            change_pin()
+        elif choice == "4":
+            terms_and_conditions()
+        elif choice == "5":
+            return
+        else:
+            print("Invalid choice")
+            input("Press Enter to continue...")
+
+
 def menu():
     global _trading_available
     while True:
@@ -1074,20 +1101,16 @@ def menu():
             print("3. Withdraw")
             print("4. Withdrawal history")
             print("5. My wallets")
-            print("6. Stop Contract")
-            print("7. Run")
-            print("8. Refund")
+            print("6. Refund")
             if _trading_available:
-                print("9. Trading accounts")
-                print("10. Change PIN")
-                print("11. Log out")
-                print("12. Terms and Conditions")
-                print("13. Exit")
+                print("7. Trading accounts")
+                print("8. Settings")
+                print("9. Log out")
+                print("10. Exit")
             else:
-                print("9. Change PIN")
-                print("10. Log out")
-                print("11. Terms and Conditions")
-                print("12. Exit")
+                print("7. Settings")
+                print("8. Log out")
+                print("9. Exit")
         else:
             print("1. Register")
             print("2. Login")
@@ -1113,23 +1136,15 @@ def menu():
             elif choice == "5":
                 wallets_menu()
             elif choice == "6":
-                stop()
-            elif choice == "7":
-                run_contract()
-            elif choice == "8":
                 refund_menu()
-            elif _trading_available and choice == "9":
+            elif _trading_available and choice == "7":
                 trading_accounts_menu()
-            elif (_trading_available and choice == "10") or (not _trading_available and choice == "9"):
-                change_pin()
-            elif (_trading_available and choice == "11") or (not _trading_available and choice == "10"):
+            elif (_trading_available and choice == "8") or (not _trading_available and choice == "7"):
+                settings_menu()
+            elif (_trading_available and choice == "9") or (not _trading_available and choice == "8"):
                 logout()
-            elif _trading_available and choice == "12":
-                terms_and_conditions()
-            elif (_trading_available and choice == "13") or (not _trading_available and choice == "12"):
+            elif (_trading_available and choice == "10") or (not _trading_available and choice == "9"):
                 break
-            elif not _trading_available and choice == "11":
-                terms_and_conditions()
             else:
                 print("Invalid choice")
         else:
