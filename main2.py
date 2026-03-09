@@ -792,6 +792,22 @@ def create_refund_request(
     }
 
 
+@app.get("/menu-badges")
+def menu_badges(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Lightweight endpoint for CLI menu notification badges: withdrawable amount and pending refund count."""
+    _process_refunds(user.id, db)
+    db.refresh(user)
+    available = max(0.0, float(getattr(user, "available_for_withdraw", None) or 0.0))
+    refund_pending = db.query(RefundRequest).filter(
+        RefundRequest.user_id == user.id,
+        RefundRequest.status == "pending",
+    ).count()
+    return {
+        "withdraw_available": round(available, 2),
+        "refund_pending_count": refund_pending,
+    }
+
+
 @app.get("/refund-requests")
 def list_refund_requests(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """List current user's refund requests with status."""

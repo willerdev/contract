@@ -475,6 +475,21 @@ def _get_dashboard_data():
     return data, err
 
 
+def _get_menu_badges():
+    """Fetch menu notification badges (withdraw available, refund pending count). Returns dict with withdraw_available, refund_pending_count; zeros on failure."""
+    try:
+        res = requests.get(f"{BASE_URL}/menu-badges", headers=auth_headers(), timeout=6)
+        if res.status_code == 200 and res.text:
+            data = res.json()
+            return {
+                "withdraw_available": float(data.get("withdraw_available") or 0),
+                "refund_pending_count": int(data.get("refund_pending_count") or 0),
+            }
+    except Exception:
+        pass
+    return {"withdraw_available": 0, "refund_pending_count": 0}
+
+
 def dashboard():
     if not _require_auth():
         return
@@ -1096,12 +1111,17 @@ def menu():
         print("0. Check for updates")
         if logged_in:
             _fetch_trading_available()
+            badges = _get_menu_badges()
+            w_av = badges.get("withdraw_available") or 0
+            ref_pending = badges.get("refund_pending_count") or 0
+            withdraw_label = f"3. Withdraw (${w_av:.2f})" if w_av > 0 else "3. Withdraw"
+            refund_label = f"6. Refund ({ref_pending})" if ref_pending > 0 else "6. Refund"
             print("1. Buy Contract")
             print("2. Dashboard")
-            print("3. Withdraw")
+            print(withdraw_label)
             print("4. Withdrawal history")
             print("5. My wallets")
-            print("6. Refund")
+            print(refund_label)
             if _trading_available:
                 print("7. Trading accounts")
                 print("8. Settings")
