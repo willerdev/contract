@@ -100,11 +100,8 @@ The CLI is **served from your Render app** at `/download/ContractCLI.exe`, so us
      `cp dist/ContractCLI.exe static/ContractCLI.exe` (Mac/Linux).  
    - Commit and push (or deploy). The backend serves `static/ContractCLI.exe` at **GET /download/ContractCLI.exe**.
 
-4. **Set backend env (Render)**  
-   - `CLI_LATEST_VERSION` = same as in **VERSION** (e.g. `1.0.1`).  
-   - Leave `CLI_DOWNLOAD_URL` unset so it defaults to your app URL (uses `RENDER_EXTERNAL_URL` or `PUBLIC_URL`):  
-     `https://<your-app>.onrender.com/download/ContractCLI.exe`.  
-   Redeploy after changing env.
+4. **Deploy**  
+   Push to your repo; Render deploys. The backend reads **VERSION** from the repo, so the “Check for updates” menu automatically shows this version to users—no need to set `CLI_LATEST_VERSION` on Render (unless you want to override). Leave `CLI_DOWNLOAD_URL` unset so the download link is your app URL.
 
 5. **Tell users**  
    Users run **ContractCLI.exe**, choose **0. Check for updates**. If their version is older, they get a link to **your Render app** to download the new exe (no GitHub link).

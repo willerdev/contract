@@ -49,13 +49,29 @@ def health(db: Session = Depends(get_db)):
     return {"status": "ok", "database": "ok"}
 
 
-# CLI update check: version and download URL (served from this app to avoid exposing repo)
+# CLI update check: version from repo VERSION file so pushes automatically show new version to users
+_APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+_VERSION_FILE = os.path.join(_APP_ROOT, "VERSION")
+
+
+def _read_deployed_cli_version():
+    """Read CLI version from VERSION file in deployed repo; env override for manual control."""
+    if os.environ.get("CLI_LATEST_VERSION"):
+        return os.environ.get("CLI_LATEST_VERSION", "1.0.0").strip()
+    try:
+        if os.path.isfile(_VERSION_FILE):
+            with open(_VERSION_FILE, "r") as f:
+                return f.read().strip() or "1.0.0"
+    except Exception:
+        pass
+    return "1.0.0"
+
+
 _APP_PUBLIC_URL = (os.environ.get("PUBLIC_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "https://contract-31az.onrender.com").strip().rstrip("/")
-CLI_LATEST_VERSION = (os.environ.get("CLI_LATEST_VERSION") or "1.0.0").strip()
 CLI_DOWNLOAD_URL = (os.environ.get("CLI_DOWNLOAD_URL") or f"{_APP_PUBLIC_URL}/download/ContractCLI.exe").strip()
 
 # Path to static CLI binary (deploy with ContractCLI.exe in static/ when releasing)
-_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+_STATIC_DIR = os.path.join(_APP_ROOT, "static")
 _CLI_EXE_PATH = os.path.join(_STATIC_DIR, "ContractCLI.exe")
 
 
@@ -69,9 +85,9 @@ def download_cli():
 
 @app.get("/version")
 def version():
-    """Public endpoint for CLI to check for updates. Returns latest CLI version and download URL."""
+    """Public endpoint for CLI to check for updates. Version read from repo VERSION file on each request."""
     return {
-        "cli_version": CLI_LATEST_VERSION,
+        "cli_version": _read_deployed_cli_version(),
         "download_url": CLI_DOWNLOAD_URL,
     }
 
