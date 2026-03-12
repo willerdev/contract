@@ -167,6 +167,11 @@ def _find_contract_list_in_data(data):
     return []
 
 
+def _normalize_pin(pin: str) -> str:
+    """Keep only digits; server will reject if not exactly 6."""
+    return "".join(c for c in (pin or "").strip() if c.isdigit())
+
+
 def _parse_version(s: str):
     """Convert '1.2.3' to (1, 2, 3) for comparison. Non-numeric parts become 0."""
     parts = (s or "0").strip().split(".")
