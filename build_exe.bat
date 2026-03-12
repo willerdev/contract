@@ -1,6 +1,6 @@
 @echo off
-REM Build Contract CLI into a single .exe for distribution.
-REM Run from project folder. Installs PyInstaller then builds.
+setlocal enabledelayedexpansion
+REM Build updated Contract CLI .exe. Run from project folder. Installs PyInstaller then builds.
 
 cd /d "%~dp0"
 
@@ -8,7 +8,12 @@ echo Installing build dependencies...
 pip install -r requirements-build.txt --quiet
 
 echo.
-echo Building ContractCLI.exe...
+if exist VERSION (
+    set /p VER=<VERSION
+    echo Building ContractCLI.exe version !VER!...
+) else (
+    echo Building ContractCLI.exe...
+)
 pyinstaller --noconfirm cli.spec
 
 if %ERRORLEVEL% NEQ 0 (
@@ -17,8 +22,12 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
+if not exist static mkdir static
+copy /Y dist\ContractCLI.exe static\ContractCLI.exe >nul
+
 echo.
 echo Done. Executable: dist\ContractCLI.exe
+echo Copied to static\ContractCLI.exe for deploy. Commit and push to release.
 echo Distribute to users: dist\ContractCLI.exe and run_cli.bat (optional)
 echo.
 pause
