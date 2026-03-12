@@ -4,6 +4,15 @@ REM Build updated Contract CLI .exe. Run from project folder. Installs PyInstall
 
 cd /d "%~dp0"
 
+set "SPEC=%~dp0cli.spec"
+if not exist "%SPEC%" (
+    echo Error: cli.spec not found at "%SPEC%".
+    echo Current folder: %CD%
+    dir /b
+    pause
+    exit /b 1
+)
+
 echo Installing build dependencies...
 pip install -r requirements-build.txt --quiet
 
@@ -14,7 +23,7 @@ if exist VERSION (
 ) else (
     echo Building ContractCLI.exe...
 )
-pyinstaller --noconfirm cli.spec
+pyinstaller --noconfirm "%SPEC%"
 
 if %ERRORLEVEL% NEQ 0 (
     echo Build failed.

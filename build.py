@@ -44,8 +44,6 @@ def main():
         os.path.join(script_dir, distpath),
         "--workpath",
         os.path.join(script_dir, workpath),
-        "--specpath",
-        script_dir,
         spec,
     ]
 
