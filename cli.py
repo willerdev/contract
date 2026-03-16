@@ -38,6 +38,9 @@ CLI_VERSION = _read_cli_version()
 # Timeout for server check. Render free tier can take 30–60s to wake from spin-down.
 SERVER_CHECK_TIMEOUT = int(os.environ.get("CLI_SERVER_TIMEOUT", "75"))
 
+# User-facing message when server is unreachable (e.g. Render free tier spin-down).
+BUSY_MESSAGE = "Servers busy. Please try again after 5 seconds."
+
 # Cached: is Trading accounts (MetaAPI) available on the server? None = not yet checked; True/False = cached. Cleared on logout.
 _trading_available = None
 
@@ -90,16 +93,8 @@ def _check_server():
     """Raise a clear error if the backend server is not reachable."""
     try:
         requests.get(f"{BASE_URL}/", timeout=SERVER_CHECK_TIMEOUT)
-    except requests.exceptions.ConnectionError:
-        raise SystemExit(
-            f"Cannot reach server at {BASE_URL}. Connection refused.\n"
-            "Start the backend server first (e.g. in another terminal), then run this CLI again."
-        )
-    except requests.exceptions.Timeout:
-        raise SystemExit(
-            f"Server at {BASE_URL} did not respond in {SERVER_CHECK_TIMEOUT}s.\n"
-            "If using Render free tier, the service may be waking up—try again in a minute."
-        )
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        raise SystemExit(BUSY_MESSAGE)
 
 
 def save_token(token):
@@ -795,8 +790,11 @@ def run_contract():
     """Show which contract to run, then show a 'processing' stream with random amounts under $0.20."""
     if not _require_auth():
         return
-    # Use the same dashboard fetch as the Dashboard menu (option 2)
-    data, err = _loading(lambda: _get_dashboard_data(), "Loading...")
+    try:
+        data, err = _loading(lambda: _get_dashboard_data(), "Loading...")
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        print(f"❌ {BUSY_MESSAGE}")
+        return
     if err:
         print(f"❌ {err}")
         return
@@ -866,12 +864,16 @@ def run_contract():
 
     # Start run on server (earnings saved there; survives disconnect/power off)
     import random
-    res = _loading(lambda: requests.post(
-        f"{BASE_URL}/run/start",
-        headers=auth_headers(),
-        json={"contract_id": cid},
-        timeout=30
-    ), "Starting run...")
+    try:
+        res = _loading(lambda: requests.post(
+            f"{BASE_URL}/run/start",
+            headers=auth_headers(),
+            json={"contract_id": cid},
+            timeout=30
+        ), "Starting run...")
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        print(f"❌ {BUSY_MESSAGE}")
+        return
     data, err = _parse_response(res)
     if err or res.status_code != 200:
         print(f"❌ {err or data.get('detail', res.text)}")
@@ -937,6 +939,8 @@ def run_contract():
             print(f"\n✅ Run stopped. ${d.get('earnings_added', 0)} added to your withdrawable balance.")
         else:
             print("\n✅ Run stopped." + (f" {d.get('message', '')}" if isinstance(d, dict) else ""))
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        print(f"\n✅ Run stopped. ({BUSY_MESSAGE} Earnings may have been saved by heartbeat.)")
     except Exception as e:
         print(f"\n✅ Run stopped. (Server stop request failed: {e}. Earnings may have been saved by heartbeat.)")
 
@@ -1326,6 +1330,10 @@ def main():
     except SystemExit:
         _pause_if_exe()
         raise
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        print(f"❌ {BUSY_MESSAGE}")
+        _pause_if_exe()
+        menu()
     except Exception as e:
         print("Error:", e)
         import traceback
