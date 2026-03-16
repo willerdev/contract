@@ -14,7 +14,7 @@ try:
     load_dotenv()
 except ImportError:
     pass
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from sqlalchemy.exc import IntegrityError
 
@@ -186,6 +186,18 @@ class RefundRequest(Base):
     admin_notes = Column(String(1024), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Message(Base):
+    """User support messages. from_admin=False = user sent; from_admin=True = admin/support reply. Inbox = from_admin=True; Outbox = from_admin=False."""
+    __tablename__ = "messages"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    from_admin = Column(Boolean, default=False)
+    subject = Column(String(255), nullable=True)
+    body = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    read_at = Column(DateTime, nullable=True)
 
 
 # Create tables if they don't exist

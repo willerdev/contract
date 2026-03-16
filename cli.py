@@ -481,7 +481,7 @@ def _get_dashboard_data():
 
 
 def _get_menu_badges():
-    """Fetch menu notification badges (withdraw available, refund pending count). Returns dict with withdraw_available, refund_pending_count; zeros on failure."""
+    """Fetch menu notification badges (withdraw, refund pending, unread messages). Returns dict; zeros on failure."""
     try:
         res = requests.get(f"{BASE_URL}/menu-badges", headers=auth_headers(), timeout=6)
         if res.status_code == 200 and res.text:
@@ -489,10 +489,11 @@ def _get_menu_badges():
             return {
                 "withdraw_available": float(data.get("withdraw_available") or 0),
                 "refund_pending_count": int(data.get("refund_pending_count") or 0),
+                "messages_unread_count": int(data.get("messages_unread_count") or 0),
             }
     except Exception:
         pass
-    return {"withdraw_available": 0, "refund_pending_count": 0}
+    return {"withdraw_available": 0, "refund_pending_count": 0, "messages_unread_count": 0}
 
 
 def dashboard():
@@ -1080,6 +1081,125 @@ def _fetch_trading_available():
     return _trading_available
 
 
+def messages_menu():
+    """Messages: New, Inbox, Outbox."""
+    while True:
+        clear_screen()
+        print_header()
+        print("--- Messages ---")
+        print("1. New message")
+        print("2. Inbox (replies from support)")
+        print("3. Outbox (messages I sent)")
+        print("4. Back")
+        choice = input("Choose: ").strip()
+        if choice == "1":
+            # New message
+            subject = input("Subject (optional, Enter to skip): ").strip() or None
+            print("Message body (empty line to send):")
+            lines = []
+            while True:
+                line = input()
+                if line == "":
+                    break
+                lines.append(line)
+            body = "\n".join(lines).strip()
+            if not body:
+                print("❌ Message body is required.")
+                input("Press Enter to continue...")
+                continue
+            res = _loading(
+                lambda: requests.post(f"{BASE_URL}/messages", headers=auth_headers(), json={"subject": subject or "", "body": body}, timeout=15),
+                "Sending...",
+            )
+            data, err = _parse_response(res)
+            if err:
+                print(f"❌ {err}")
+            else:
+                print("✅ Message sent. You will see the reply in Inbox.")
+            input("Press Enter to continue...")
+        elif choice == "2":
+            # Inbox
+            res = _loading(lambda: requests.get(f"{BASE_URL}/messages/inbox", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT), "Loading inbox...")
+            data, err = _parse_response(res)
+            if err:
+                print(f"❌ {err}")
+                input("Press Enter to continue...")
+                continue
+            messages = (data.get("messages") if isinstance(data, dict) else []) or []
+            if not messages:
+                print("No messages in inbox.")
+                input("Press Enter to continue...")
+                continue
+            print("\n--- Inbox ---")
+            for m in messages:
+                read_tag = " [read]" if m.get("read_at") else " [unread]"
+                subj = (m.get("subject") or "(no subject)")[:40]
+                created = (m.get("created_at") or "")[:19]
+                print(f"  {m.get('id')}. {subj}  {created}{read_tag}")
+            mid = input("Open message ID (or Enter to go back): ").strip()
+            if not mid:
+                continue
+            try:
+                mid = int(mid)
+            except ValueError:
+                print("Invalid ID")
+                input("Press Enter to continue...")
+                continue
+            res2 = requests.get(f"{BASE_URL}/messages/{mid}", headers=auth_headers(), timeout=10)
+            msg_data, msg_err = _parse_response(res2)
+            if msg_err or not msg_data:
+                print(f"❌ {msg_err or 'Not found'}")
+            else:
+                print("\n--- Message ---")
+                print(f"From: Support")
+                print(f"Subject: {msg_data.get('subject') or '(no subject)'}")
+                print(f"Date: {msg_data.get('created_at', '')}")
+                print(f"\n{msg_data.get('body', '')}")
+            input("Press Enter to continue...")
+        elif choice == "3":
+            # Outbox
+            res = _loading(lambda: requests.get(f"{BASE_URL}/messages/outbox", headers=auth_headers(), timeout=SERVER_CHECK_TIMEOUT), "Loading outbox...")
+            data, err = _parse_response(res)
+            if err:
+                print(f"❌ {err}")
+                input("Press Enter to continue...")
+                continue
+            messages = (data.get("messages") if isinstance(data, dict) else []) or []
+            if not messages:
+                print("No messages in outbox.")
+                input("Press Enter to continue...")
+                continue
+            print("\n--- Outbox ---")
+            for m in messages:
+                subj = (m.get("subject") or "(no subject)")[:40]
+                created = (m.get("created_at") or "")[:19]
+                print(f"  {m.get('id')}. {subj}  {created}")
+            mid = input("Open message ID (or Enter to go back): ").strip()
+            if not mid:
+                continue
+            try:
+                mid = int(mid)
+            except ValueError:
+                print("Invalid ID")
+                input("Press Enter to continue...")
+                continue
+            res2 = requests.get(f"{BASE_URL}/messages/{mid}", headers=auth_headers(), timeout=10)
+            msg_data, msg_err = _parse_response(res2)
+            if msg_err or not msg_data:
+                print(f"❌ {msg_err or 'Not found'}")
+            else:
+                print("\n--- Message ---")
+                print(f"Subject: {msg_data.get('subject') or '(no subject)'}")
+                print(f"Date: {msg_data.get('created_at', '')}")
+                print(f"\n{msg_data.get('body', '')}")
+            input("Press Enter to continue...")
+        elif choice == "4":
+            return
+        else:
+            print("Invalid choice")
+            input("Press Enter to continue...")
+
+
 def settings_menu():
     """Submenu: Stop Contract, Run, Change PIN, Terms and Conditions."""
     while True:
@@ -1119,23 +1239,26 @@ def menu():
             badges = _get_menu_badges()
             w_av = badges.get("withdraw_available") or 0
             ref_pending = badges.get("refund_pending_count") or 0
+            msg_unread = badges.get("messages_unread_count") or 0
             withdraw_label = f"3. Withdraw (${w_av:.2f})" if w_av > 0 else "3. Withdraw"
             refund_label = f"6. Refund ({ref_pending})" if ref_pending > 0 else "6. Refund"
+            messages_label = f"7. Messages ({msg_unread})" if msg_unread > 0 else "7. Messages"
             print("1. Buy Contract")
             print("2. Dashboard")
             print(withdraw_label)
             print("4. Withdrawal history")
             print("5. My wallets")
             print(refund_label)
+            print(messages_label)
             if _trading_available:
-                print("7. Trading accounts")
+                print("8. Trading accounts")
+                print("9. Settings")
+                print("10. Log out")
+                print("11. Exit")
+            else:
                 print("8. Settings")
                 print("9. Log out")
                 print("10. Exit")
-            else:
-                print("7. Settings")
-                print("8. Log out")
-                print("9. Exit")
         else:
             print("1. Register")
             print("2. Login")
@@ -1162,13 +1285,15 @@ def menu():
                 wallets_menu()
             elif choice == "6":
                 refund_menu()
-            elif _trading_available and choice == "7":
+            elif choice == "7":
+                messages_menu()
+            elif _trading_available and choice == "8":
                 trading_accounts_menu()
-            elif (_trading_available and choice == "8") or (not _trading_available and choice == "7"):
-                settings_menu()
             elif (_trading_available and choice == "9") or (not _trading_available and choice == "8"):
-                logout()
+                settings_menu()
             elif (_trading_available and choice == "10") or (not _trading_available and choice == "9"):
+                logout()
+            elif (_trading_available and choice == "11") or (not _trading_available and choice == "10"):
                 break
             else:
                 print("Invalid choice")

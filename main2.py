@@ -20,7 +20,7 @@ import traceback
 _roi_pct = int(os.environ.get("ROI_DAILY_PERCENT", "8"))
 DAILY_RATE = min(12, max(5, _roi_pct)) / 100.0
 
-from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode, PinResetCode, TelegramLinkToken, TradingAccount, AccountManagementPayment, RefundRequest
+from database import get_db, engine, User, Contract, ContractPlan, Withdrawal, TrustedWallet, RunSession, RunEarnings, PermissionCode, PinResetCode, TelegramLinkToken, TradingAccount, AccountManagementPayment, RefundRequest, Message
 import cryptomus
 import bybit
 import metaapi
@@ -794,7 +794,7 @@ def create_refund_request(
 
 @app.get("/menu-badges")
 def menu_badges(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Lightweight endpoint for CLI menu notification badges: withdrawable amount and pending refund count."""
+    """Lightweight endpoint for CLI menu notification badges: withdrawable, refund pending, unread messages."""
     _process_refunds(user.id, db)
     db.refresh(user)
     available = max(0.0, float(getattr(user, "available_for_withdraw", None) or 0.0))
@@ -802,9 +802,15 @@ def menu_badges(user: User = Depends(get_current_user), db: Session = Depends(ge
         RefundRequest.user_id == user.id,
         RefundRequest.status == "pending",
     ).count()
+    messages_unread = db.query(Message).filter(
+        Message.user_id == user.id,
+        Message.from_admin == True,
+        Message.read_at == None,
+    ).count()
     return {
         "withdraw_available": round(available, 2),
         "refund_pending_count": refund_pending,
+        "messages_unread_count": messages_unread,
     }
 
 
@@ -827,6 +833,143 @@ def list_refund_requests(user: User = Depends(get_current_user), db: Session = D
             for r in rows
         ],
     }
+
+
+# ================= MESSAGES (user support: write, inbox, outbox) =================
+
+@app.get("/messages/inbox")
+def messages_inbox(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """List messages received from support (from_admin=True)."""
+    rows = db.query(Message).filter(
+        Message.user_id == user.id,
+        Message.from_admin == True,
+    ).order_by(Message.created_at.desc()).all()
+    return {
+        "messages": [
+            {
+                "id": m.id,
+                "subject": m.subject,
+                "body": m.body,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "read_at": m.read_at.isoformat() if m.read_at else None,
+            }
+            for m in rows
+        ],
+    }
+
+
+@app.get("/messages/outbox")
+def messages_outbox(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """List messages sent by the user (from_admin=False)."""
+    rows = db.query(Message).filter(
+        Message.user_id == user.id,
+        Message.from_admin == False,
+    ).order_by(Message.created_at.desc()).all()
+    return {
+        "messages": [
+            {
+                "id": m.id,
+                "subject": m.subject,
+                "body": m.body,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in rows
+        ],
+    }
+
+
+@app.get("/messages/{message_id}")
+def message_get(message_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get a single message by id (must belong to current user)."""
+    m = db.query(Message).filter(Message.id == message_id, Message.user_id == user.id).first()
+    if not m:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if m.from_admin and not m.read_at:
+        m.read_at = datetime.utcnow()
+        db.commit()
+    return {
+        "id": m.id,
+        "from_admin": m.from_admin,
+        "subject": m.subject,
+        "body": m.body,
+        "created_at": m.created_at.isoformat() if m.created_at else None,
+        "read_at": m.read_at.isoformat() if m.read_at else None,
+    }
+
+
+@app.post("/messages")
+def message_send(data: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Send a new message to support."""
+    subject = (data.get("subject") or "").strip() or None
+    body = (data.get("body") or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Message body is required")
+    m = Message(user_id=user.id, from_admin=False, subject=subject, body=body)
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    return {
+        "id": m.id,
+        "message": "Message sent. You will see the reply in Inbox.",
+        "created_at": m.created_at.isoformat() if m.created_at else None,
+    }
+
+
+@app.patch("/messages/{message_id}/read")
+def message_mark_read(message_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Mark an inbox message as read."""
+    m = db.query(Message).filter(Message.id == message_id, Message.user_id == user.id, Message.from_admin == True).first()
+    if not m:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if not m.read_at:
+        m.read_at = datetime.utcnow()
+        db.commit()
+    return {"id": m.id, "read_at": m.read_at.isoformat() if m.read_at else None}
+
+
+# Admin: reply to a user (requires ADMIN_SECRET in header or body)
+ADMIN_SECRET = (os.environ.get("ADMIN_SECRET") or "").strip()
+
+
+@app.post("/admin/messages")
+def admin_send_message(data: dict, request: Request, db: Session = Depends(get_db)):
+    """Send a reply to a user. Requires header X-Admin-Secret: ADMIN_SECRET or body admin_secret."""
+    secret = request.headers.get("x-admin-secret") or data.get("admin_secret") or ""
+    if not ADMIN_SECRET or secret != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    user_id = data.get("user_id")
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="user_id required")
+    user_id = int(user_id)
+    body = (data.get("body") or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="body required")
+    subject = (data.get("subject") or "").strip() or None
+    m = Message(user_id=user_id, from_admin=True, subject=subject, body=body)
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    return {"id": m.id, "user_id": user_id, "created_at": m.created_at.isoformat() if m.created_at else None}
+
+
+@app.get("/admin/messages")
+def admin_list_messages(request: Request, db: Session = Depends(get_db)):
+    """List all messages grouped by user (for admin to see and reply). Requires X-Admin-Secret."""
+    secret = request.headers.get("x-admin-secret") or ""
+    if not ADMIN_SECRET or secret != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    rows = db.query(Message).order_by(Message.created_at.desc()).all()
+    by_user = defaultdict(list)
+    for m in rows:
+        by_user[m.user_id].append({
+            "id": m.id,
+            "from_admin": m.from_admin,
+            "subject": m.subject,
+            "body": (m.body or "")[:200] + ("..." if len(m.body or "") > 200 else ""),
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+            "read_at": m.read_at.isoformat() if m.read_at else None,
+        })
+    return {"by_user": dict(by_user), "users": list(by_user.keys())}
 
 
 # ================= RUN (22h, earnings every 10 min to withdrawables) =================
